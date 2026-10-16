@@ -201,7 +201,20 @@ class AdaptiveExposureLoss(nn.Module):
         under_deficit = torch.relu(self.target_exposure - local_mean)
         over_excess = torch.relu(local_mean - self.max_acceptable_lum)
 
-        deficit_total = under_deficit**2 + 2.5 * (over_excess**2)
+        # Prioritize underexposed patches somewhat more when their estimated
+        # reliability is low, while keeping a nonzero floor so the model cannot
+        # reduce this loss merely by predicting zero reliability everywhere.
+        # Detach the weight to avoid optimizing reliability directly through it.
+        if reliability_map is not None:
+            local_reliability = F.avg_pool2d(
+                reliability_map.detach(), kernel_size=self.patch_size,
+                stride=self.patch_size, padding=0
+            ).clamp(0.0, 1.0)
+            under_weight = 1.0 - 0.5 * local_reliability
+        else:
+            under_weight = 1.0
+
+        deficit_total = under_weight * (under_deficit**2) + 2.5 * (over_excess**2)
         return torch.mean(deficit_total)
 
 
@@ -262,7 +275,9 @@ class SNRGuidedTotalLoss(nn.Module):
         self.w_exposure = float(loss_cfg.get("w_exposure", 4.0))
         self.w_color = float(loss_cfg.get("w_color", 2.0))
         self.w_smooth = float(loss_cfg.get("w_smooth", 10.0))
-        self.w_consistency = float(loss_cfg.get("w_consistency", 0.1))
+        self.w_consistency = float(loss_cfg.get("w_consistency", 0.05))
+        self.pseudo_min_luminance = float(loss_cfg.get("pseudo_min_luminance", 0.10))
+        self.pseudo_min_reliability = float(loss_cfg.get("pseudo_min_reliability", 0.25))
 
         # Individual Modules
         self.synthesizer = PseudoPairSynthesizer(
@@ -317,7 +332,10 @@ class SNRGuidedTotalLoss(nn.Module):
         if self.w_pseudo > 0 or self.w_gradient > 0:
             lum_in = 0.299 * input_low[:, 0:1] + 0.587 * input_low[:, 1:2] + 0.114 * input_low[:, 2:3]
             # Valid target mask: only pixels with sufficient illumination and high reliability serve as pseudo targets!
-            rel_target_mask = (lum_in >= 0.28).float() * (q_map >= 0.35).float()
+            rel_target_mask = (
+                (lum_in >= self.pseudo_min_luminance).float()
+                * (q_map >= self.pseudo_min_reliability).float()
+            )
 
             with torch.no_grad():
                 x_syn, alpha_val, noise_val = self.synthesizer.degrade(input_low)
@@ -327,9 +345,11 @@ class SNRGuidedTotalLoss(nn.Module):
 
             if self.w_pseudo > 0:
                 diff_pseudo = torch.sqrt((enh_syn - input_low) ** 2 + 1e-6)
-                # Compute reconstruction loss ONLY on the reliable well-lit pixels
-                denom_rel = torch.sum(rel_target_mask) + 1e-5
-                if denom_rel > 10.0:
+                # The mask has one channel but the RGB error has three. Include
+                # channel count in the denominator to avoid inflating this loss
+                # by approximately 3x.
+                denom_rel = torch.sum(rel_target_mask) * input_low.shape[1] + 1e-5
+                if torch.sum(rel_target_mask) > 10.0:
                     l_pseudo = torch.sum(diff_pseudo * rel_target_mask) / denom_rel
                 else:
                     # If whole image is pitch black with no reliable target, fallback to exposure-guided reconstruction
