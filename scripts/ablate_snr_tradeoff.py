@@ -186,14 +186,29 @@ def main():
     else:
         print(f"[Notice] New model checkpoint not found locally. Searching Kaggle working directories...")
 
-    # 3. Load Dataset
-    if not (os.path.exists(args.low_dir) and os.path.exists(args.high_dir)):
-        print(f"[Error] Dataset directories do not exist: {args.low_dir}, {args.high_dir}")
+    # 3. Locate Dataset Paths
+    low_dir = Path(args.low_dir)
+    high_dir = Path(args.high_dir)
+    if not (low_dir.exists() and high_dir.exists()):
+        candidates = [
+            Path("/kaggle/working/lol_compat/eval15"),
+            Path("data/lol_dataset/eval15"),
+            Path("/kaggle/input/lol-dataset/eval15"),
+        ]
+        for c in candidates:
+            if (c / "low").is_dir() and (c / "high").is_dir():
+                low_dir = c / "low"
+                high_dir = c / "high"
+                print(f"[Dataset] Auto-detected eval15 at: {c}")
+                break
+
+    if not (low_dir.exists() and high_dir.exists()):
+        print(f"[Error] Dataset directories do not exist: {low_dir}, {high_dir}")
         return
 
-    dataset = PairedEvaluationDataset(args.low_dir, args.high_dir)
+    dataset = PairedEvaluationDataset(str(low_dir), str(high_dir))
     loader = DataLoader(dataset, batch_size=1, shuffle=False)
-    print(f"[Dataset] Evaluating on {len(dataset)} paired test images from {args.low_dir}")
+    print(f"[Dataset] Evaluating on {len(dataset)} paired test images from {low_dir}")
 
     # Results dictionaries
     records = []

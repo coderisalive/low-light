@@ -62,10 +62,25 @@ def auto_detect_kaggle_dataset(suggested_train_dir: str) -> dict:
             "test_high_dir": str(root / "eval15" / "high"),
         }
 
-    search_dirs = [Path("/kaggle/input"), Path("data"), Path(".")]
+    search_dirs = [
+        Path("/kaggle/working/lol_compat"),
+        Path("/kaggle/working"),
+        Path("/kaggle/input"),
+        Path("data"),
+        Path("."),
+    ]
     for search_root in search_dirs:
         if not search_root.exists():
             continue
+        if (search_root / "our485" / "low").is_dir():
+            root = search_root
+            print(f"[Dataset] Found LOL root at: {root}")
+            return {
+                "train_dir": str(root / "our485" / "low"),
+                "train_high_dir": str(root / "our485" / "high"),
+                "test_low_dir": str(root / "eval15" / "low"),
+                "test_high_dir": str(root / "eval15" / "high"),
+            }
         for low_dir in search_root.rglob("our485/low"):
             if low_dir.is_dir() and any(low_dir.glob("*")):
                 root = low_dir.parent.parent
