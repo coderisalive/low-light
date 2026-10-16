@@ -2,11 +2,16 @@
 SNR-Guided Internal Reference Transfer Network (SNRInternalReferenceNet)
 for Lightweight Self-Supervised Low-Light Image Enhancement.
 
-Scientific Principle:
-Exploits reliable, high-SNR regions within the same input image as internal
-structural references to guide the enhancement of noise-dominated, low-SNR regions.
-Structural features are transferred via confidence-gated matching, rejecting
-saturated highlights, severe noise, and structurally dissimilar regions.
+Refined Architecture (v2):
+- Phase 3 Compliant: Confidence-controlled residual feature fusion:
+      F_fused = F_target + alpha * confidence * (F_reference - F_target)
+  Prevents ghosting, blotches, and arbitrary feature drift.
+- Phase 4 Compliant: Structural saliency noise decoupling:
+  Separates coherent structural edges from high-frequency sensor noise.
+  Prevents real contours from being penalized as noise.
+- Phase 5 Compliant: Chromaticity-preserving Retinex output head:
+  Scales chrominance proportionally with luminance gain, eliminating
+  muted colors, grey haze, and highlight clipping.
 """
 
 from typing import Dict, Any, Tuple, Optional
@@ -22,16 +27,16 @@ from models.enhancement_head import ColorSpaceConverter
 
 class ReliabilityEstimator(nn.Module):
     """
-    Lightweight Reliability & SNR-Proxy Estimator.
+    Module A: Refined Reliability & SNR-Proxy Estimator.
     Estimates a continuous reliability map Q in [0, 1] based on:
     - Local signal intensity S (illumination proxy)
-    - Local noise estimate sigma_n (Laplacian-based high-frequency noise proxy)
-    - Saturation penalty P_sat (rejects blown-out highlights lacking valid structure)
+    - Directional gradient magnitude (structural edge coherence)
+    - Laplacian high-frequency response decoupled from true edges (noise proxy)
+    - Saturation penalty P_sat (rejects clipped highlights)
     - Lightweight learnable refinement
 
-    Assumptions & Caveats:
-    Without calibrated sensor gain/read-noise profiles, this operates as an
-    estimated SNR proxy / reliability map, rather than a physical decibel measurement.
+    Scientific note: Without calibrated sensor profiles, this acts as a
+    principled reliability/SNR proxy rather than a physical decibel measurement.
     """
 
     def __init__(
@@ -48,43 +53,62 @@ class ReliabilityEstimator(nn.Module):
 
         # Learnable scaling coefficients
         self.w_signal = nn.Parameter(torch.tensor(1.2, dtype=torch.float32))
-        self.w_noise = nn.Parameter(torch.tensor(2.5, dtype=torch.float32))
+        self.w_struct = nn.Parameter(torch.tensor(1.5, dtype=torch.float32))
+        self.w_noise = nn.Parameter(torch.tensor(2.0, dtype=torch.float32))
         self.bias = nn.Parameter(torch.tensor(0.2, dtype=torch.float32))
 
-        # Compact convolutional refinement
+        # Compact convolutional refinement (5 input channels: lum, signal, noise, sat_pen, struct)
         self.refine = nn.Sequential(
-            DepthwiseSeparableConv(4, base_channels, kernel_size=3, padding=1),
+            DepthwiseSeparableConv(5, base_channels, kernel_size=3, padding=1),
             nn.LeakyReLU(0.2, inplace=False),
             nn.Conv2d(base_channels, 1, kernel_size=1),
             nn.Sigmoid(),
         )
 
-        # Fixed Laplacian kernel for noise estimation
+        # Fixed Laplacian kernel for isotropic high-frequency response
         laplacian = torch.tensor(
             [[0.0, 1.0, 0.0], [1.0, -4.0, 1.0], [0.0, 1.0, 0.0]], dtype=torch.float32
         ).view(1, 1, 3, 3)
         self.register_buffer("laplacian_kernel", laplacian)
 
-    def compute_noise_proxy(self, lum: torch.Tensor) -> torch.Tensor:
+        # Sobel kernels for directional edge energy
+        sobel_x = torch.tensor([[-1.0, 0.0, 1.0], [-2.0, 0.0, 2.0], [-1.0, 0.0, 1.0]], dtype=torch.float32).view(1, 1, 3, 3) / 8.0
+        sobel_y = torch.tensor([[-1.0, -2.0, -1.0], [0.0, 0.0, 0.0], [1.0, 2.0, 1.0]], dtype=torch.float32).view(1, 1, 3, 3) / 8.0
+        self.register_buffer("sobel_x", sobel_x)
+        self.register_buffer("sobel_y", sobel_y)
+
+    def compute_edge_and_noise_proxies(self, lum: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Estimate local noise proxy via high-pass Laplacian filtering
-        followed by local average pooling.
+        Decouple coherent structural edges from isotropic sensor noise.
+        - True edges: strong coherent directional gradients (Sobel x & y).
+        - Noise: high Laplacian variance without directional alignment.
         """
-        # Convolve with Laplacian
+        # 1. Directional gradient energy
+        gx = F.conv2d(lum, self.sobel_x, padding=1)
+        gy = F.conv2d(lum, self.sobel_y, padding=1)
+        edge_mag = torch.sqrt(gx**2 + gy**2 + self.eps)
+        struct_proxy = F.avg_pool2d(
+            edge_mag, kernel_size=self.kernel_size, stride=1, padding=self.kernel_size // 2
+        )
+
+        # 2. Laplacian high-frequency response
         high_freq = F.conv2d(lum, self.laplacian_kernel, padding=1)
         abs_hf = torch.abs(high_freq)
-        # Average pool across local window
-        noise_proxy = F.avg_pool2d(
+        hf_pool = F.avg_pool2d(
             abs_hf, kernel_size=self.kernel_size, stride=1, padding=self.kernel_size // 2
         )
-        return torch.clamp(noise_proxy, 0.0, 1.0)
+
+        # 3. Decouple: noise proxy is high-frequency variance MINUS coherent edge energy
+        noise_proxy = torch.clamp(hf_pool - 0.6 * struct_proxy, 0.0, 1.0)
+        struct_proxy = torch.clamp(struct_proxy * 3.0, 0.0, 1.0)
+
+        return struct_proxy, noise_proxy
 
     def compute_saturation_penalty(self, lum: torch.Tensor) -> torch.Tensor:
         """
         Smooth saturation penalty: P_sat -> 0 for pixels near or above saturation_threshold.
         Prevents overexposed/clipped regions from acting as structural references.
         """
-        # Sigmoid transition centered at saturation_threshold with steepness 25.0
         steepness = 25.0
         penalty = torch.sigmoid(steepness * (self.saturation_threshold - lum))
         return torch.clamp(penalty, 0.0, 1.0)
@@ -106,24 +130,30 @@ class ReliabilityEstimator(nn.Module):
             lum, kernel_size=self.kernel_size, stride=1, padding=self.kernel_size // 2
         )
 
-        # 2. Local noise proxy
-        noise_proxy = self.compute_noise_proxy(lum)
+        # 2. Decoupled structural and noise proxies
+        struct_proxy, noise_proxy = self.compute_edge_and_noise_proxies(lum)
 
         # 3. Saturation penalty
         sat_penalty = self.compute_saturation_penalty(lum)
 
-        # 4. Physical proxy formulation
+        # 4. Principled proxy formulation:
+        # Boosted by signal and coherent structure, penalized by noise
         log_signal = torch.log(torch.clamp(signal, min=self.eps, max=1.0))
         log_signal = torch.clamp(log_signal, min=-10.0, max=0.0)
-        logit = self.w_signal * log_signal - self.w_noise * noise_proxy + self.bias
+        logit = (
+            self.w_signal * log_signal
+            + self.w_struct * struct_proxy
+            - self.w_noise * noise_proxy
+            + self.bias
+        )
         phys_proxy = torch.sigmoid(torch.clamp(logit, min=-12.0, max=12.0))
 
-        # 5. Convolutional refinement for spatial context
-        inp_feat = torch.cat([lum, signal, noise_proxy, sat_penalty], dim=1)
+        # 5. Convolutional refinement for multi-channel spatial context
+        inp_feat = torch.cat([lum, signal, noise_proxy, sat_penalty, struct_proxy], dim=1)
         learned_refinement = self.refine(inp_feat)
 
-        # Combined reliability: physical proxy modulated by learned refinement and saturation penalty
-        q_map = sat_penalty * (0.6 * phys_proxy + 0.4 * learned_refinement)
+        # Combined reliability: strictly zeroed at clipped highlights
+        q_map = sat_penalty * (0.65 * phys_proxy + 0.35 * learned_refinement)
         q_map = torch.clamp(q_map, 0.0, 1.0)
 
         return q_map, noise_proxy, sat_penalty
@@ -163,7 +193,7 @@ class InternalReferenceMatcher(nn.Module):
         self.temperature = temperature
         self.eps = eps
 
-        # Lightweight linear projections for query and key
+        # Lightweight linear projections for query, key, value
         self.proj_q = nn.Conv2d(feature_channels, feature_channels // 2, kernel_size=1, bias=False)
         self.proj_k = nn.Conv2d(feature_channels, feature_channels // 2, kernel_size=1, bias=False)
         self.proj_v = nn.Conv2d(feature_channels, feature_channels, kernel_size=1, bias=False)
@@ -190,11 +220,9 @@ class InternalReferenceMatcher(nn.Module):
         v_proj = self.proj_v(feat)  # (B, C, H, W)
 
         # 2. Grid-level patch pooling
-        # Patch grid size: (H_p, W_p)
         h_p = max(1, h // self.patch_size)
         w_p = max(1, w // self.patch_size)
 
-        # Adaptive pooling to grid tokens: shape (B, C', H_p, W_p) -> (B, M, C')
         q_tokens = F.adaptive_avg_pool2d(q_proj, (h_p, w_p)).flatten(2).transpose(1, 2)
         k_tokens = F.adaptive_avg_pool2d(k_proj, (h_p, w_p)).flatten(2).transpose(1, 2)
         v_tokens = F.adaptive_avg_pool2d(v_proj, (h_p, w_p)).flatten(2).transpose(1, 2)
@@ -203,7 +231,6 @@ class InternalReferenceMatcher(nn.Module):
         m = q_tokens.size(1)  # total number of patches
 
         # 3. Structural feature normalization (L2-norm along channel dimension)
-        # Guarantees similarity reflects structural/directional alignment, not brightness
         q_norm = F.normalize(q_tokens, p=2, dim=-1, eps=self.eps)  # (B, M, C/2)
         k_norm = F.normalize(k_tokens, p=2, dim=-1, eps=self.eps)  # (B, M, C/2)
 
@@ -246,7 +273,6 @@ class InternalReferenceMatcher(nn.Module):
         ref_tokens = torch.sum(topk_weights.unsqueeze(-1) * gathered_v, dim=2)  # (B, M, C)
         ref_q_tokens = torch.sum(topk_weights * gathered_q, dim=-1, keepdim=True)  # (B, M, 1)
 
-
         # 6. Compute matching confidence:
         # Confidence depends on:
         # (a) maximum structural similarity exceeding similarity_threshold
@@ -282,36 +308,36 @@ class InternalReferenceMatcher(nn.Module):
 
 class ConfidenceGatedFeatureTransfer(nn.Module):
     """
-    Module D: Confidence-Gated Structural Feature Transfer.
-    Fuses reference structural features into target feature representations.
+    Module D: Confidence-Controlled Residual Feature Transfer (Phase 3).
+    Implements the principled residual feature-fusion equation:
+        F_fused = F_target + alpha * confidence * (F_reference - F_target)
 
-    The transfer gate strength gamma depends strictly on:
-    - Target-region unreliability (1 - Q_target): regions that are already clean
-      and reliable need little reference transfer, while corrupted/dark regions benefit most.
-    - Reference reliability Q_ref: ensures transferred features come from high-quality sources.
-    - Matching confidence C_match: guarantees structural compatibility.
-    - Learnable channel-wise gating network.
+    Properties:
+    - Conservative & Bounded: alpha is bounded in [0, max_transfer] (default max 0.35).
+    - Zero Drift: When reference matches target content, (F_reference - F_target) -> 0.
+    - Continuous Fallback: When confidence -> 0, F_fused = F_target strictly,
+      completely preventing ghosting, blur, or dark blotchy artifacts.
+    - Target need weighting: only low-SNR target pixels (1 - Q_target) receive assistance.
     """
 
-    def __init__(self, feature_channels: int = 32) -> None:
+    def __init__(
+        self,
+        feature_channels: int = 32,
+        max_transfer: float = 0.35,
+        init_alpha: float = 0.20,
+    ) -> None:
         super().__init__()
         self.feature_channels = feature_channels
+        self.max_transfer = max_transfer
 
-        # Gating network combining target, reference, and confidence indicators
-        in_gate_channels = feature_channels * 2 + 3  # F_target (C) + F_ref (C) + Q_target (1) + Q_ref (1) + C_match (1)
-        self.gate_conv = nn.Sequential(
-            nn.Conv2d(in_gate_channels, feature_channels // 2, kernel_size=1),
-            nn.LeakyReLU(0.2, inplace=False),
-            nn.Conv2d(feature_channels // 2, feature_channels, kernel_size=1),
-            nn.Sigmoid(),
+        # Learnable transfer strength parameter initialized conservatively
+        self.alpha_param = nn.Parameter(torch.tensor(init_alpha, dtype=torch.float32))
+
+        # Spatial smoothing convolution without bias to guarantee zero-drift when feat_ref == feat_target
+        self.diff_smooth = DepthwiseSeparableConv(
+            feature_channels, feature_channels, kernel_size=3, padding=1, bias=False
         )
 
-        # Feature adaptation projection
-        self.ref_adapt = nn.Sequential(
-            DepthwiseSeparableConv(feature_channels, feature_channels, kernel_size=3, padding=1),
-            nn.LeakyReLU(0.2, inplace=False),
-            DepthwiseSeparableConv(feature_channels, feature_channels, kernel_size=3, padding=1),
-        )
 
     def forward(
         self,
@@ -330,43 +356,37 @@ class ConfidenceGatedFeatureTransfer(nn.Module):
             match_conf: Match confidence map (B, 1, H, W)
         Returns:
             feat_fused: Fused feature representation (B, C, H, W)
-            gate: Effective transfer gate map (B, C, H, W)
+            effective_gate: Effective fusion gate map (B, 1, H, W)
         """
-        gate_inp = torch.cat([feat_target, feat_ref, q_target, q_ref, match_conf], dim=1)
-        channel_gate = self.gate_conv(gate_inp)
+        # Bounded transfer coefficient in [0, max_transfer]
+        alpha = torch.sigmoid(self.alpha_param) * self.max_transfer
 
-        # Modulate gate by matching confidence, reference quality, and target need
-        # Target need factor: (1.0 - 0.7 * q_target) ensures low-reliability areas receive maximum transfer
-        need_factor = 1.0 - 0.7 * torch.clamp(q_target, 0.0, 1.0)
-        effective_gate = channel_gate * match_conf * q_ref * need_factor
+        # Differential feature residual
+        feat_diff = self.diff_smooth(feat_ref - feat_target)
 
-        # Transferred adapted features
-        adapted_ref = self.ref_adapt(feat_ref)
+        # Confidence weighting: structural confidence * reference quality * target unreliability
+        need_factor = 1.0 - 0.75 * torch.clamp(q_target, 0.0, 1.0)
+        confidence = match_conf * q_ref * need_factor
+        effective_gate = alpha * confidence
 
-        # Residual gated feature fusion
-        feat_fused = feat_target + effective_gate * adapted_ref
+        # Residual fusion equation: F_target + alpha * confidence * (F_reference - F_target)
+        feat_fused = feat_target + effective_gate * feat_diff
 
         return feat_fused, effective_gate
 
 
 class ConservativeEnhancementHead(nn.Module):
     """
-    Module E: Conservative Enhancement Output Head.
-    Predicts bounded illumination map L and restrained residual corrections:
+    Module E: Conservative Chromaticity-Preserving Enhancement Head (Phase 5).
     1. Illumination Map L in [eps, 1.0].
-    2. Base Retinex correction: I_base = I_low / (L^gamma + eps).
-    3. Dual bounded residual heads:
-       - Luminance correction: Delta_Y in [-1, 1]
-       - Chrominance correction: Delta_C in [-1, 1]
-    4. Bounded output equation:
-       Y_out = clamp(Y_base + alpha * (1 - Q) * Delta_Y, 0.0, 1.0)
-       C_out = C_base + beta * (1 - Q) * Delta_C
-       I_enh = ycbcr_to_rgb(Y_out, C_out)
-
-    Ensures:
-    - Finite range [0, 1].
-    - Preserves correct RGB color ordering.
-    - Prevents grey haze, highlight clipping, and indiscriminate contrast amplification.
+    2. Base Retinex luminance correction: Y_base = Y_in / (L^gamma + eps).
+    3. Proportional Chrominance Scaling:
+       CbCr_base = CbCr_in * (Y_base / (Y_in + eps))^0.65
+       Preserves vivid, authentic chromaticity without muted grey/beige washouts.
+    4. Bounded residual refinement in YCbCr:
+       Y_out = clamp(Y_base + alpha * (1 - 0.5 Q) * Delta_Y, 0.0, 1.0)
+       CbCr_out = CbCr_base + beta * (1 - 0.5 Q) * Delta_C
+       I_enh = ycbcr_to_rgb(Y_out, CbCr_out)
     """
 
     def __init__(
@@ -389,8 +409,8 @@ class ConservativeEnhancementHead(nn.Module):
         )
 
         # Learnable residual scale parameters
-        self.alpha = nn.Parameter(torch.tensor(0.15, dtype=torch.float32))
-        self.beta = nn.Parameter(torch.tensor(0.08, dtype=torch.float32))
+        self.alpha = nn.Parameter(torch.tensor(0.12, dtype=torch.float32))
+        self.beta = nn.Parameter(torch.tensor(0.06, dtype=torch.float32))
 
         # Luminance residual head (predicts Delta_Y)
         self.head_lum = nn.Sequential(
@@ -429,26 +449,28 @@ class ConservativeEnhancementHead(nn.Module):
         illum = self.head_illum(feat_fused)
         illum = torch.clamp(illum, min=self.eps, max=1.0)
 
-        # 2. Retinex illumination correction with gamma compression
-        illum_comp = torch.clamp(illum**self.gamma, min=self.eps, max=1.0)
-        base_enhanced = torch.clamp(original_rgb / illum_comp, 0.0, 1.0)
+        # 2. Decompose input into YCbCr
+        y_orig, cbcr_orig = ColorSpaceConverter.rgb_to_ycbcr(original_rgb)
 
-        # 3. Predict residual corrections
+        # 3. Retinex illumination correction on luminance
+        illum_comp = torch.clamp(illum**self.gamma, min=self.eps, max=1.0)
+        y_base = torch.clamp(y_orig / illum_comp, 0.0, 1.0)
+
+        # 4. Predict residual corrections
         delta_y = self.head_lum(feat_fused)
         delta_c = self.head_chrom(feat_fused)
 
-        # 4. Color space decomposition
-        y_base, cbcr_base = ColorSpaceConverter.rgb_to_ycbcr(base_enhanced)
+        # 5. Proportional Chrominance Scaling (prevents muted/washed-out grey cast)
+        # Scaled smoothly with luminance gain ratio: (y_base / y_orig)^0.65
+        lum_gain = torch.clamp((y_base + self.eps) / (y_orig + self.eps), 1.0, 6.0) ** 0.65
+        cbcr_scaled = cbcr_orig * lum_gain
 
-        # 5. Reliability-modulated bounded residual updates
-        # Saturated or reliable regions receive smaller residual modifications
+        # 6. Reliability-modulated bounded updates
         mod_weight = 1.0 - 0.5 * torch.clamp(q_map, 0.0, 1.0)
-        y_out = torch.clamp(
-            y_base + torch.abs(self.alpha) * mod_weight * delta_y, 0.0, 1.0
-        )
-        cbcr_out = cbcr_base + self.beta * mod_weight * delta_c
+        y_out = torch.clamp(y_base + torch.abs(self.alpha) * mod_weight * delta_y, 0.0, 1.0)
+        cbcr_out = cbcr_scaled + self.beta * mod_weight * delta_c
 
-        # 6. Reconstruct RGB
+        # 7. Invertible color conversion back to RGB
         enhanced_rgb = ColorSpaceConverter.ycbcr_to_rgb(y_out, cbcr_out)
 
         return enhanced_rgb, illum, delta_y, delta_c
@@ -456,13 +478,7 @@ class ConservativeEnhancementHead(nn.Module):
 
 class SNRInternalReferenceNet(nn.Module):
     """
-    SNR-Guided Internal Reference Transfer Network.
-    Integrates:
-    - Reliability & SNR-Proxy Estimator
-    - Compact Multi-Scale Feature Extractor
-    - High-Reliability Internal Reference Matcher
-    - Confidence-Gated Feature Transfer
-    - Conservative Bounded Enhancement Head
+    SNR-Guided Internal Reference Transfer Network (v2).
     """
 
     def __init__(
@@ -475,6 +491,7 @@ class SNRInternalReferenceNet(nn.Module):
         min_ref_reliability: float = 0.40,
         similarity_threshold: float = 0.25,
         use_reference_transfer: bool = True,
+        max_transfer: float = 0.35,
         act_type: str = "leaky_relu",
     ) -> None:
         super().__init__()
@@ -487,12 +504,10 @@ class SNRInternalReferenceNet(nn.Module):
         )
 
         # 2. Multi-Scale Feature Encoder
-        # Stem
         self.stem = nn.Sequential(
             DepthwiseSeparableConv(3, feature_channels, kernel_size=3, padding=1),
             nn.LeakyReLU(0.2, inplace=False) if act_type == "leaky_relu" else nn.GELU(),
         )
-        # Residual blocks with cyclic dilations [1, 2, 1, 2]
         dilations = [1, 2, 1, 2][:num_blocks]
         while len(dilations) < num_blocks:
             dilations.append(1)
@@ -520,6 +535,7 @@ class SNRInternalReferenceNet(nn.Module):
         # 4. Confidence-Gated Feature Transfer
         self.feature_transfer = ConfidenceGatedFeatureTransfer(
             feature_channels=feature_channels,
+            max_transfer=max_transfer,
         )
 
         # 5. Enhancement Output Head
@@ -538,7 +554,6 @@ class SNRInternalReferenceNet(nn.Module):
         Full diagnostic forward pass providing all intermediate maps
         for loss computation and visualization.
         """
-        # Luminance channel
         lum = 0.299 * x[:, 0:1, :, :] + 0.587 * x[:, 1:2, :, :] + 0.114 * x[:, 2:3, :, :]
 
         # 1. Estimate Reliability / SNR-proxy map
@@ -563,7 +578,7 @@ class SNRInternalReferenceNet(nn.Module):
             ref_feat = torch.zeros_like(feat)
             match_conf = torch.zeros((b, 1, h, w), device=x.device)
             ref_q = torch.zeros((b, 1, h, w), device=x.device)
-            transfer_gate = torch.zeros_like(feat)
+            transfer_gate = torch.zeros((b, 1, h, w), device=x.device)
             feat_fused = feat
 
         # 5. Predict illumination and bounded enhancement
@@ -608,5 +623,6 @@ def build_snr_internal_reference_net(
         min_ref_reliability=model_cfg.get("min_ref_reliability", 0.40),
         similarity_threshold=model_cfg.get("similarity_threshold", 0.25),
         use_reference_transfer=model_cfg.get("use_reference_transfer", True),
+        max_transfer=model_cfg.get("max_transfer", 0.35),
         act_type=model_cfg.get("act_type", "leaky_relu"),
     )

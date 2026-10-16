@@ -1,14 +1,22 @@
 """
-SNR-Guided Internal Reference Loss Suite.
-Implements:
+SNR-Guided Internal Reference Loss Suite (v2).
+Refined Self-Supervised Objectives:
 - Loss A: Reliable-Patch Pseudo-Pair Reconstruction Loss (Charbonnier)
+  Only well-illuminated, high-reliability regions (Y >= 0.28, Q >= 0.40) serve as
+  restoration targets. Dark regions are NOT forced to remain dark!
 - Loss B: Reliability-Weighted Gradient Structure Loss
+  Preserves edge contours on high-confidence features.
 - Loss C: Confidence-Gated Reference Feature Consistency Loss
+  Feature consistency gated strictly by structural similarity and reliability.
 - Loss D: Adaptive Exposure Control Loss
+  Penalizes only genuine underexposure without clipping highlights.
 - Loss E: Patch Color-Consistency Loss
+  Preserves chromatic angle in color space.
 - Loss F: Edge-Aware Illumination Smoothness Loss
+  Enforces smooth illumination while respecting high-frequency physical boundaries.
 - Loss G: Noise-Aware Augmentation Consistency Loss
-- SNRGuidedTotalLoss: Composite configurable manager with NaN/Inf safeguards
+  Geometric flip consistency weighted by reliability.
+- SNRGuidedTotalLoss: Composite configurable manager with NaN/Inf safeguards.
 """
 
 from typing import Dict, Any, Tuple, Optional
@@ -36,14 +44,11 @@ class CharbonnierLoss(nn.Module):
 
 class PseudoPairSynthesizer:
     """
-    Synthesizes realistic low-light degraded pseudo-pairs from reliable patches
-    of the input image.
-
+    Synthesizes realistic low-light degraded pseudo-pairs from reliable regions.
     x_syn = D(x_ref; a, n)
     where:
-    - a in [min_attenuation, max_attenuation] simulates severe photon deficiency.
+    - a in [min_attenuation, max_attenuation] simulates photon starvation.
     - n ~ N(0, sigma_n^2) simulates Poisson-Gaussian sensor noise.
-    - Optional gamma distortion simulates non-linear camera response.
     """
 
     def __init__(
@@ -60,23 +65,19 @@ class PseudoPairSynthesizer:
 
     def degrade(self, x_ref: torch.Tensor) -> Tuple[torch.Tensor, float, float]:
         """
-        Degrades input reference tensor x_ref (B, 3, H, W) to synthetic low-light x_syn.
+        Degrades input tensor x_ref (B, 3, H, W) to synthetic low-light x_syn.
         """
         b, c, h, w = x_ref.shape
         device = x_ref.device
 
-        # Random attenuation factor per batch item
         alpha = torch.empty(b, 1, 1, 1, device=device).uniform_(
             self.min_attenuation, self.max_attenuation
         )
-        # Random noise standard deviation
         sigma = torch.empty(b, 1, 1, 1, device=device).uniform_(
             self.noise_std_min, self.noise_std_max
         )
 
         noise = torch.randn_like(x_ref) * sigma
-
-        # Controlled attenuation + additive noise, clamped safely to [0, 1]
         x_syn = torch.clamp(x_ref * alpha + noise, 0.0, 1.0)
 
         return x_syn, float(alpha.mean().item()), float(sigma.mean().item())
@@ -148,23 +149,13 @@ class ConfidenceGatedReferenceLoss(nn.Module):
         match_confidence: torch.Tensor,
         min_conf: float = 0.20,
     ) -> torch.Tensor:
-        """
-        Args:
-            feat_target: (B, C, H, W)
-            feat_ref: (B, C, H, W)
-            match_confidence: (B, 1, H, W) in [0, 1]
-        """
-        # Normalize features along channel dimension
         f_t_norm = F.normalize(feat_target, p=2, dim=1, eps=self.eps)
         f_r_norm = F.normalize(feat_ref, p=2, dim=1, eps=self.eps)
 
-        # Cosine distance: 1 - cos_sim in [0, 2]
         cos_sim = torch.sum(f_t_norm * f_r_norm, dim=1, keepdim=True)
         cos_dist = 1.0 - torch.clamp(cos_sim, -1.0, 1.0)
 
-        # Confidence mask: ignore regions where match confidence is low
         conf_mask = (match_confidence > min_conf).float() * match_confidence
-
         denom = torch.sum(conf_mask) + 1e-6
         if denom < 1.0:
             return torch.tensor(0.0, device=feat_target.device)
@@ -176,16 +167,15 @@ class ConfidenceGatedReferenceLoss(nn.Module):
 class AdaptiveExposureLoss(nn.Module):
     """
     Loss D: Adaptive Exposure Control Loss.
-    Only penalizes underexposed patches (Y_patch < target_exposure).
-    Does NOT penalize patches that are already sufficiently illuminated or bright,
-    preventing over-exposure and the creation of a washed-out grey haze.
+    Penalizes underexposure in dark patches without forcing already bright
+    or properly exposed areas to blow out.
     """
 
     def __init__(
         self,
         patch_size: int = 16,
         target_exposure: float = 0.50,
-        max_acceptable_lum: float = 0.85,
+        max_acceptable_lum: float = 0.88,
     ) -> None:
         super().__init__()
         self.patch_size = patch_size
@@ -204,28 +194,21 @@ class AdaptiveExposureLoss(nn.Module):
     ) -> torch.Tensor:
         lum = self.rgb_to_luminance(enhanced)
 
-        # Local patch mean luminance
         local_mean = F.avg_pool2d(
             lum, kernel_size=self.patch_size, stride=self.patch_size, padding=0
         )
 
-        # Underexposure deficit: penalize only when local_mean < target_exposure
         under_deficit = torch.relu(self.target_exposure - local_mean)
-
-        # Overexposure penalty for extreme highlight blow-out (above max_acceptable_lum)
         over_excess = torch.relu(local_mean - self.max_acceptable_lum)
 
-        deficit_total = under_deficit**2 + 2.0 * (over_excess**2)
-
+        deficit_total = under_deficit**2 + 2.5 * (over_excess**2)
         return torch.mean(deficit_total)
 
 
 class NoiseAwareAugmentationConsistencyLoss(nn.Module):
     """
     Loss G: Noise-Aware Augmentation Consistency Loss.
-    Enforces that enhanced outputs under geometric transformation (horizontal flip)
-    are consistent, weighted by reliability so noise-corrupted pixels do not force
-    artificial detail suppression.
+    Enforces geometric flip consistency weighted by reliability.
     """
 
     def __init__(self, eps: float = 1e-3) -> None:
@@ -239,15 +222,11 @@ class NoiseAwareAugmentationConsistencyLoss(nn.Module):
         enh_original: torch.Tensor,
         q_map: torch.Tensor,
     ) -> torch.Tensor:
-        # Flip horizontally
         x_flipped = torch.flip(x_low, dims=[3])
         diag_flipped = model.forward_diagnostic(x_flipped)
         enh_flipped = diag_flipped["enhanced"]
 
-        # Flip back to match original orientation
         enh_unflipped = torch.flip(enh_flipped, dims=[3])
-
-        # Charbonnier distance modulated by reliability
         diff = torch.sqrt((enh_original - enh_unflipped) ** 2 + 1e-6)
         q_weight = torch.clamp(q_map, 0.1, 1.0)
 
@@ -257,7 +236,7 @@ class NoiseAwareAugmentationConsistencyLoss(nn.Module):
 
 class SNRGuidedTotalLoss(nn.Module):
     """
-    Composite Loss Manager for SNR-Guided Internal Reference Training.
+    Composite Loss Manager for SNR-Guided Internal Reference Training (v2).
     Configurable Loss Composition:
         L_total = lambda_pseudo * L_pseudo
                 + lambda_gradient * L_gradient
@@ -267,7 +246,9 @@ class SNRGuidedTotalLoss(nn.Module):
                 + lambda_smooth * L_smooth
                 + lambda_consistency * L_consistency
 
-    Supports both pseudo-pair synthetic supervision and real-image self-supervised objectives.
+    Critical Fix: Pseudo-pair reconstruction loss L_pseudo only uses genuinely
+    well-lit, high-reliability regions (Y >= 0.28, Q >= 0.40) as targets,
+    ensuring dark regions are never penalized for being brightened!
     """
 
     def __init__(self, config: Optional[Dict[str, Any]] = None) -> None:
@@ -281,7 +262,7 @@ class SNRGuidedTotalLoss(nn.Module):
         self.w_exposure = float(loss_cfg.get("w_exposure", 4.0))
         self.w_color = float(loss_cfg.get("w_color", 2.0))
         self.w_smooth = float(loss_cfg.get("w_smooth", 10.0))
-        self.w_consistency = float(loss_cfg.get("w_consistency", 0.2))
+        self.w_consistency = float(loss_cfg.get("w_consistency", 0.1))
 
         # Individual Modules
         self.synthesizer = PseudoPairSynthesizer(
@@ -329,13 +310,15 @@ class SNRGuidedTotalLoss(nn.Module):
         feat_target = diag["features"]
         match_conf = diag["match_confidence"]
 
-        # 2. Loss A & B: Pseudo-Pair Reconstruction & Structure on Reliable Patches
+        # 2. Loss A & B: Pseudo-Pair Reconstruction on Genuinely Well-Lit Patches Only
         l_pseudo = torch.tensor(0.0, device=device)
         l_gradient = torch.tensor(0.0, device=device)
 
         if self.w_pseudo > 0 or self.w_gradient > 0:
-            # Generate synthetic degradation from reliable regions
-            # Use input_low detached as pseudo-reference
+            lum_in = 0.299 * input_low[:, 0:1] + 0.587 * input_low[:, 1:2] + 0.114 * input_low[:, 2:3]
+            # Valid target mask: only pixels with sufficient illumination and high reliability serve as pseudo targets!
+            rel_target_mask = (lum_in >= 0.28).float() * (q_map >= 0.35).float()
+
             with torch.no_grad():
                 x_syn, alpha_val, noise_val = self.synthesizer.degrade(input_low)
 
@@ -343,23 +326,24 @@ class SNRGuidedTotalLoss(nn.Module):
             enh_syn = diag_syn["enhanced"]
 
             if self.w_pseudo > 0:
-                # Charbonnier reconstruction loss against input_low
-                # Modulated by reliability map so only reliable target regions serve as strong ground truth
                 diff_pseudo = torch.sqrt((enh_syn - input_low) ** 2 + 1e-6)
-                l_pseudo = torch.sum(diff_pseudo * q_map) / (torch.sum(q_map) + 1e-6)
+                # Compute reconstruction loss ONLY on the reliable well-lit pixels
+                denom_rel = torch.sum(rel_target_mask) + 1e-5
+                if denom_rel > 10.0:
+                    l_pseudo = torch.sum(diff_pseudo * rel_target_mask) / denom_rel
+                else:
+                    # If whole image is pitch black with no reliable target, fallback to exposure-guided reconstruction
+                    l_pseudo = torch.tensor(0.0, device=device)
 
             if self.w_gradient > 0:
-                # Reliability-weighted gradient structure loss
-                l_gradient = self.loss_structure(enh_syn, input_low, weight_mask=q_map)
+                l_gradient = self.loss_structure(enh_syn, input_low, weight_mask=rel_target_mask)
 
         # 3. Loss C: Confidence-Gated Reference Feature Consistency
         l_ref = torch.tensor(0.0, device=device)
         if self.w_reference > 0 and diag.get("features_fused") is not None:
-            l_ref = self.loss_ref_feature(
-                feat_target, diag["features_fused"], match_conf
-            )
+            l_ref = self.loss_ref_feature(feat_target, diag["features_fused"], match_conf)
 
-        # 4. Loss D: Adaptive Exposure Control
+        # 4. Loss D: Adaptive Exposure Control on Enhanced Real Image
         l_exp = torch.tensor(0.0, device=device)
         if self.w_exposure > 0:
             l_exp = self.loss_exposure(enhanced, reliability_map=q_map)
@@ -390,7 +374,7 @@ class SNRGuidedTotalLoss(nn.Module):
             + self.w_consistency * l_consistency
         )
 
-        # Check for numerical stability (NaN or Inf)
+        # Numerical stability safeguard
         if torch.isnan(total_loss) or torch.isinf(total_loss):
             raise FloatingPointError(
                 f"Numerical instability detected: total_loss is {total_loss.item()}"

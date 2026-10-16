@@ -208,3 +208,55 @@ def test_checkpoint_save_and_reload():
             out_after = model_new(x)
 
         assert torch.allclose(out_before, out_after, atol=1e-6)
+
+
+def test_confidence_controlled_fusion_formula():
+    """Verify Phase 3 residual fusion equation: F_fused = F_target + alpha * conf * (F_ref - F_target)"""
+    from models.snr_internal_reference_net import ConfidenceGatedFeatureTransfer
+    fusion = ConfidenceGatedFeatureTransfer(feature_channels=24, max_transfer=0.35)
+    fusion.eval()
+
+    b, c, h, w = 1, 24, 32, 32
+    f_target = torch.randn(b, c, h, w)
+    f_ref = torch.randn(b, c, h, w)
+    q_target = torch.full((b, 1, h, w), 0.20)
+    q_ref = torch.full((b, 1, h, w), 0.85)
+
+    # Subtest A: When confidence is zero, F_fused must equal F_target exactly
+    with torch.no_grad():
+        f_fused_zero_conf, gate_zero = fusion(f_target, f_ref, q_target, q_ref, match_conf=torch.zeros((b, 1, h, w)))
+    assert torch.allclose(f_fused_zero_conf, f_target, atol=1e-6), "Fallback to F_target failed when confidence is 0!"
+
+    # Subtest B: When F_ref == F_target, F_fused must equal F_target
+    with torch.no_grad():
+        f_fused_identical, _ = fusion(f_target, f_target, q_target, q_ref, match_conf=torch.ones((b, 1, h, w)))
+    assert torch.allclose(f_fused_identical, f_target, atol=1e-6), "Zero-drift property failed when F_ref == F_target!"
+
+    # Subtest C: Fusion gate must be non-negative and strictly bounded by max_transfer (0.35)
+    with torch.no_grad():
+        _, gate_active = fusion(f_target, f_ref, q_target, q_ref, match_conf=torch.ones((b, 1, h, w)))
+    assert torch.all(gate_active >= 0.0)
+    assert torch.all(gate_active <= 0.35 + 1e-5), f"Gate exceeded max_transfer! Max: {gate_active.max()}"
+
+
+def test_structural_edge_vs_noise_discrimination():
+    """Verify Phase 4 edge vs noise discrimination in ReliabilityEstimator."""
+    estimator = ReliabilityEstimator(base_channels=12)
+    estimator.eval()
+
+    # Image 1: Sharp high-contrast structural edge (black/white step)
+    step_edge = torch.zeros((1, 1, 64, 64), dtype=torch.float32)
+    step_edge[:, :, :, 32:] = 0.80
+
+    # Image 2: Flat gray with high-frequency random noise
+    flat_noisy = torch.clamp(torch.full((1, 1, 64, 64), 0.40) + torch.randn(1, 1, 64, 64) * 0.15, 0.0, 1.0)
+
+    with torch.no_grad():
+        struct_edge, noise_edge = estimator.compute_edge_and_noise_proxies(step_edge)
+        struct_noisy, noise_noisy = estimator.compute_edge_and_noise_proxies(flat_noisy)
+
+    # Edge image must have significantly higher structural proxy at the contour than the random noise image
+    assert struct_edge[:, :, :, 30:34].mean().item() > struct_noisy.mean().item()
+    # Random noise image must have higher noise proxy than the clean step edge
+    assert noise_noisy.mean().item() > noise_edge[:, :, :, :25].mean().item()
+
