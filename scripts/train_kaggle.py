@@ -203,6 +203,20 @@ def save_validation_comparisons(
         vutils.save_image(tiles, output_dir / f"epoch_{epoch:03d}_{safe_name}.png", nrow=4, normalize=False)
 
 
+def make_deterministic_split(total_items: int, validation_fraction: float, seed: int):
+    """Return disjoint, deterministic train/validation indices."""
+    if total_items < 2:
+        raise ValueError("At least two items are required for a train/validation split.")
+    if not 0.05 <= validation_fraction < 0.5:
+        raise ValueError("validation_fraction must be in [0.05, 0.5).")
+    indices = list(range(total_items))
+    random.Random(seed).shuffle(indices)
+    val_count = max(1, min(total_items - 1, int(round(total_items * validation_fraction))))
+    val_indices = sorted(indices[:val_count])
+    train_indices = sorted(indices[val_count:])
+    return train_indices, val_indices
+
+
 def _load_history_from_csv(path: Path) -> list:
     if not path.exists():
         return []
@@ -278,13 +292,7 @@ def main() -> None:
         raise RuntimeError(f"Need at least 2 training images to create a hold-out split; found {total_images}.")
 
     validation_fraction = float(training_cfg.get("validation_fraction", 0.10))
-    if not 0.05 <= validation_fraction < 0.5:
-        raise ValueError("training.validation_fraction must be in [0.05, 0.5).")
-    permutation = list(range(total_images))
-    random.Random(seed).shuffle(permutation)
-    val_count = max(1, min(total_images - 1, int(round(total_images * validation_fraction))))
-    val_indices = sorted(permutation[:val_count])
-    train_indices = sorted(permutation[val_count:])
+    train_indices, val_indices = make_deterministic_split(total_images, validation_fraction, seed)
     val_names = [full_train_dataset.image_paths[i].name for i in val_indices]
 
     train_dataset = Subset(full_train_dataset, train_indices)
