@@ -1,0 +1,30 @@
+name: Python tests
+
+on:
+  push:
+    branches: ["main", "fix/snr-training-stability"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+      - name: Install CPU PyTorch
+        run: |
+          python -m pip install --upgrade pip
+          pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision
+      - name: Install test dependencies
+        run: pip install numpy Pillow PyYAML tqdm pytest
+      - name: Compile changed Python files
+        run: |
+          python -m py_compile scripts/train_kaggle.py scripts/evaluate.py models/snr_internal_reference_net.py losses/snr_guided_losses.py datasets/paired_evaluation_dataset.py
+      - name: Run SNR-guided unit tests
+        run: python -m pytest tests/test_snr_guided.py -q
