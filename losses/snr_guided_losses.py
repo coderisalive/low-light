@@ -259,9 +259,9 @@ class SNRGuidedTotalLoss(nn.Module):
                 + lambda_smooth * L_smooth
                 + lambda_consistency * L_consistency
 
-    Critical Fix: Pseudo-pair reconstruction loss L_pseudo only uses genuinely
-    well-lit, high-reliability regions (Y >= 0.28, Q >= 0.40) as targets,
-    ensuring dark regions are never penalized for being brightened!
+    Pseudo-pair reconstruction is restricted to configurable input regions
+    above pseudo_min_luminance and pseudo_min_reliability. The RGB mask
+    denominator accounts for all three channels to keep loss scale correct.
     """
 
     def __init__(self, config: Optional[Dict[str, Any]] = None) -> None:
