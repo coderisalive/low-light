@@ -43,6 +43,8 @@ from losses.snr_guided_losses import (
     AdaptiveExposureLoss,
     ConfidenceGatedReferenceLoss,
 )
+from models.enhancement_head import ColorSpaceConverter
+from scripts.train_kaggle import make_deterministic_split
 
 
 def test_model_shapes_and_bounds():
@@ -260,3 +262,39 @@ def test_structural_edge_vs_noise_discrimination():
     # Random noise image must have higher noise proxy than the clean step edge
     assert noise_noisy.mean().item() > noise_edge[:, :, :, :25].mean().item()
 
+
+
+
+def test_ycbcr_round_trip_preserves_rgb():
+    """Color conversion should round-trip RGB in range without added cast."""
+    rgb = torch.rand(2, 3, 48, 48)
+    y, cbcr = ColorSpaceConverter.rgb_to_ycbcr(rgb)
+    reconstructed = ColorSpaceConverter.ycbcr_to_rgb(y, cbcr)
+    assert reconstructed.shape == rgb.shape
+    assert torch.isfinite(reconstructed).all()
+    assert (reconstructed - rgb).abs().mean().item() < 1e-5
+
+
+def test_deterministic_train_validation_split_is_disjoint():
+    """Held-out indices are repeatable, nonempty, and never overlap training."""
+    train_a, val_a = make_deterministic_split(485, 0.10, 42)
+    train_b, val_b = make_deterministic_split(485, 0.10, 42)
+    assert train_a == train_b
+    assert val_a == val_b
+    assert train_a and val_a
+    assert set(train_a).isdisjoint(val_a)
+    assert sorted(train_a + val_a) == list(range(485))
+    assert len(val_a) in (48, 49)
+
+
+def test_ycbcr_round_trip_constant_boundaries():
+    """Extreme valid RGB colors remain finite after conversion and inverse."""
+    rgb = torch.tensor([
+        [[ [0.0, 1.0] ], [[0.0, 1.0]], [[0.0, 1.0]]],
+        [[[1.0, 0.0]], [[0.0, 1.0]], [[0.0, 0.0]]],
+    ], dtype=torch.float32)
+    y, cbcr = ColorSpaceConverter.rgb_to_ycbcr(rgb)
+    out = ColorSpaceConverter.ycbcr_to_rgb(y, cbcr)
+    assert out.shape == rgb.shape
+    assert torch.isfinite(out).all()
+    assert out.min() >= 0 and out.max() <= 1

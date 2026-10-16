@@ -26,6 +26,7 @@ class PairedEvaluationDataset(Dataset):
         high_dir: str,
         crop_size: Optional[int] = None,
         valid_extensions: Tuple[str, ...] = (".png", ".jpg", ".jpeg", ".bmp"),
+        filenames: Optional[List[str]] = None,
     ) -> None:
         super().__init__()
         self.low_dir = Path(low_dir)
@@ -35,17 +36,20 @@ class PairedEvaluationDataset(Dataset):
         self.crop_fn = PairedRandomCrop(crop_size) if crop_size else None
 
         self.paired_files: List[Tuple[Path, Path, str]] = []
+        selected_names = set(filenames) if filenames is not None else None
 
         if self.low_dir.exists() and self.high_dir.exists():
             low_files = {
                 f.name: f
                 for f in self.low_dir.glob("*")
                 if f.suffix.lower() in self.valid_extensions
+                and (selected_names is None or f.name in selected_names)
             }
             high_files = {
                 f.name: f
                 for f in self.high_dir.glob("*")
                 if f.suffix.lower() in self.valid_extensions
+                and (selected_names is None or f.name in selected_names)
             }
 
             for name, low_p in sorted(low_files.items()):

@@ -285,8 +285,9 @@ class InternalReferenceMatcher(nn.Module):
         )
         match_conf = sim_conf * ref_q_tokens * has_valid_candidates.float()
 
-        # Zero out reference features where confidence is zero (fallback)
-        ref_tokens = ref_tokens * match_conf
+        # Keep reference features unscaled here. Confidence is applied exactly once
+        # by ConfidenceGatedFeatureTransfer; scaling here as well caused a double
+        # attenuation and made the transferred representation unnecessarily weak.
 
         # 7. Reshape tokens back to 2D grid and interpolate to full resolution (H, W)
         ref_grid = ref_tokens.transpose(1, 2).view(b, c, h_p, w_p)
@@ -366,7 +367,9 @@ class ConfidenceGatedFeatureTransfer(nn.Module):
 
         # Confidence weighting: structural confidence * reference quality * target unreliability
         need_factor = 1.0 - 0.75 * torch.clamp(q_target, 0.0, 1.0)
-        confidence = match_conf * q_ref * need_factor
+        # match_conf already includes reference reliability in InternalReferenceMatcher.
+        # Multiplying q_ref again would square the reliability weighting.
+        confidence = match_conf * need_factor
         effective_gate = alpha * confidence
 
         # Residual fusion equation: F_target + alpha * confidence * (F_reference - F_target)
@@ -462,7 +465,9 @@ class ConservativeEnhancementHead(nn.Module):
 
         # 5. Proportional Chrominance Scaling (prevents muted/washed-out grey cast)
         # Scaled smoothly with luminance gain ratio: (y_base / y_orig)^0.65
-        lum_gain = torch.clamp((y_base + self.eps) / (y_orig + self.eps), 1.0, 6.0) ** 0.65
+        # Keep chroma amplification conservative in very dark regions. Large gains
+        # amplify chroma noise and can create color casts after RGB clipping.
+        lum_gain = torch.clamp((y_base + self.eps) / (y_orig + self.eps), 1.0, 4.0) ** 0.50
         cbcr_scaled = cbcr_orig * lum_gain
 
         # 6. Reliability-modulated bounded updates
