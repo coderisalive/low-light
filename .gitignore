@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.pth
+*.pt
+.pytest_cache/
+experiments/*/samples/
+experiments/*/latest_checkpoint.pth
+experiments/*/best_checkpoint.pth
+outputs/
+data/lol_v1/
+data/lol_v2/
+data/exdark/
+.venv/
+env/

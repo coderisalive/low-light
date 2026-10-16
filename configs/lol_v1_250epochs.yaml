@@ -1,0 +1,49 @@
+# LOL-v1 250-Epoch Self-Supervised Training Configuration
+experiment_name: "lol_v1_250epochs"
+seed: 42
+
+model:
+  base_channels: 24
+  feature_channels: 32
+  num_blocks: 4
+  use_dw_conv: true
+  use_reliability_map: true
+  use_reliability_gate: true
+  use_noise_estimation: true
+  use_separate_color: true
+  act_type: "leaky_relu"
+
+training:
+  batch_size: 4
+  crop_size: 192
+  learning_rate: 0.0003
+  weight_decay: 0.0001
+  epochs: 250
+  scheduler_gamma: 0.5
+  scheduler_step_size: 60
+  device: "cpu"
+  save_interval: 10
+  eval_interval: 5
+  log_interval: 10
+  early_stopping_patience: 30
+
+loss:
+  w_mask: 0.5
+  w_exp: 8.0
+  w_smooth: 15.0
+  w_color: 3.0
+  w_struct: 0.1
+  w_identity: 0.05
+  mask_ratio: 0.15
+  mask_mode: "neighbor_mean"
+  exp_patch_size: 16
+  target_exposure: 0.55
+  smooth_k: 10.0
+  color_patch_size: 16
+
+data:
+  train_dir: "data/lol_dataset/our485/low"
+  val_low_dir: "data/lol_dataset/eval15/low"
+  val_high_dir: "data/lol_dataset/eval15/high"
+  test_low_dir: "data/lol_dataset/eval15/low"
+  test_high_dir: "data/lol_dataset/eval15/high"

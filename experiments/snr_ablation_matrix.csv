@@ -1,0 +1,7 @@
+id,variant,params,psnr,ssim,status,description
+1,1. Existing baseline (LumaGuard-Net),27049,14.32,0.6364,Evaluated,Restored baseline with fixed exposure and masked consistency
+2,2. New model w/o reference transfer,20729,N/A,N/A,Configured,SNR model with internal reference transfer disabled (local Retinex only)
+3,3. Full model with reliability-guided transfer,20729,N/A,N/A,Configured,Full proposed architecture with confidence-gated structural transfer
+4,4. Full model w/o pseudo-pair reconstruction,20729,N/A,N/A,Configured,Ablates synthetic degraded pseudo-pair reconstruction loss L_pseudo
+5,5. Full model w/o structure loss,20729,N/A,N/A,Configured,Ablates reliability-weighted gradient structure loss L_gradient
+6,6. Full model w/o noise-aware consistency,20729,N/A,N/A,Configured,Ablates augmentation consistency term L_consistency

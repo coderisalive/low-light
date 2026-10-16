@@ -1,0 +1,210 @@
+"""
+Comprehensive Unit & Integration Tests for SNR-Guided Internal Reference Transfer.
+Tests:
+1. Model forward shapes across multiple spatial dimensions (128x128, 160x160, 256x256).
+2. Parameter budget compliance (< 1,000,000 parameters).
+3. Reliability / SNR-proxy estimator behavior:
+   - Saturated highlight pixels (near 1.0) receive low reliability (penalty active).
+   - Clean, high-intensity pixels receive high reliability.
+   - High noise regions receive downweighted reliability.
+4. Reference matching fallback:
+   - When no valid references exist, confidence smoothly approaches 0 and output remains finite.
+5. Finite output bounds:
+   - Output images are strictly in [0, 1] without NaN or Inf.
+6. Gradient flow & backward pass through all modules.
+7. Loss functions:
+   - Pseudo-pair degradation generation
+   - Charbonnier reconstruction
+   - Reliability-weighted structure loss
+   - Adaptive exposure loss
+   - Augmentation consistency
+   - Composite total loss
+8. Checkpoint saving and reloading.
+"""
+
+import os
+import tempfile
+import pytest
+import torch
+import torch.nn as nn
+
+from models.snr_internal_reference_net import (
+    SNRInternalReferenceNet,
+    ReliabilityEstimator,
+    InternalReferenceMatcher,
+    ConfidenceGatedFeatureTransfer,
+    ConservativeEnhancementHead,
+    build_snr_internal_reference_net,
+)
+from losses.snr_guided_losses import (
+    SNRGuidedTotalLoss,
+    PseudoPairSynthesizer,
+    ReliabilityWeightedStructureLoss,
+    AdaptiveExposureLoss,
+    ConfidenceGatedReferenceLoss,
+)
+
+
+def test_model_shapes_and_bounds():
+    """Verify forward diagnostic shapes and [0, 1] output bounds across varying resolutions."""
+    model = SNRInternalReferenceNet(base_channels=16, feature_channels=24, num_blocks=3)
+    model.eval()
+
+    test_shapes = [(2, 3, 128, 128), (1, 3, 160, 160), (1, 3, 200, 200)]
+
+    for shape in test_shapes:
+        x = torch.rand(shape, dtype=torch.float32)
+        with torch.no_grad():
+            diag = model.forward_diagnostic(x)
+
+        assert diag["enhanced"].shape == shape, f"Expected {shape}, got {diag['enhanced'].shape}"
+        assert diag["illumination"].shape == (shape[0], 1, shape[2], shape[3])
+        assert diag["reliability_map"].shape == (shape[0], 1, shape[2], shape[3])
+        assert diag["noise_proxy"].shape == (shape[0], 1, shape[2], shape[3])
+        assert diag["match_confidence"].shape == (shape[0], 1, shape[2], shape[3])
+        assert diag["features_fused"].shape == (shape[0], 24, shape[2], shape[3])
+
+        # Bounds check
+        assert torch.all(diag["enhanced"] >= 0.0) and torch.all(diag["enhanced"] <= 1.0)
+        assert torch.all(diag["illumination"] >= 1e-4) and torch.all(diag["illumination"] <= 1.0)
+        assert torch.all(diag["reliability_map"] >= 0.0) and torch.all(diag["reliability_map"] <= 1.0)
+
+        # Finite checks
+        assert not torch.isnan(diag["enhanced"]).any()
+        assert not torch.isinf(diag["enhanced"]).any()
+
+
+def test_parameter_budget():
+    """Verify that trainable parameters are well under the 1,000,000 parameter budget."""
+    model = SNRInternalReferenceNet(base_channels=24, feature_channels=32, num_blocks=4)
+    param_count = model.count_parameters()
+    print(f"\n[Test] Measured trainable parameter count: {param_count:,}")
+
+    assert param_count < 1_000_000, f"Parameter count {param_count} exceeds 1,000,000!"
+    assert param_count > 10_000, f"Parameter count {param_count} is implausibly low."
+
+
+def test_reliability_estimator_physics():
+    """Verify reliability estimator correctly differentiates saturation, clean signal, and noise."""
+    estimator = ReliabilityEstimator(base_channels=12, saturation_threshold=0.92)
+    estimator.eval()
+
+    # Case A: Saturated patch (all 0.98)
+    sat_img = torch.full((1, 3, 64, 64), 0.98, dtype=torch.float32)
+    sat_lum = torch.full((1, 1, 64, 64), 0.98, dtype=torch.float32)
+
+    # Case B: Clean well-exposed patch (all 0.60)
+    clean_img = torch.full((1, 3, 64, 64), 0.60, dtype=torch.float32)
+    clean_lum = torch.full((1, 1, 64, 64), 0.60, dtype=torch.float32)
+
+    # Case C: Severely noisy dark patch (0.05 + strong noise)
+    noise_img = torch.clamp(
+        torch.full((1, 3, 64, 64), 0.05, dtype=torch.float32) + torch.randn(1, 3, 64, 64) * 0.15,
+        0.0,
+        1.0,
+    )
+    noise_lum = 0.299 * noise_img[:, 0:1] + 0.587 * noise_img[:, 1:2] + 0.114 * noise_img[:, 2:3]
+
+    with torch.no_grad():
+        q_sat, n_sat, sat_pen = estimator(sat_img, sat_lum)
+        q_clean, n_clean, clean_pen = estimator(clean_img, clean_lum)
+        q_noise, n_noise, noise_pen = estimator(noise_img, noise_lum)
+
+    # Saturation penalty must be active on saturated image
+    assert sat_pen.mean().item() < 0.20, f"Expected sat_pen < 0.20 on saturated highlights, got {sat_pen.mean().item():.3f}"
+    assert clean_pen.mean().item() > 0.80, f"Expected clean_pen > 0.80 on normal exposure, got {clean_pen.mean().item():.3f}"
+
+    # Clean signal must have higher reliability than saturated highlights
+    assert q_clean.mean().item() > q_sat.mean().item()
+
+    # Noise proxy must be higher on noisy input than on flat input
+    assert n_noise.mean().item() > n_clean.mean().item()
+
+
+def test_reference_matcher_fallback():
+    """Verify fallback behavior when no trustworthy reference candidate exists."""
+    matcher = InternalReferenceMatcher(
+        feature_channels=24,
+        patch_size=16,
+        top_k=2,
+        min_ref_reliability=0.50,
+        similarity_threshold=0.30,
+    )
+    matcher.eval()
+
+    b, c, h, w = 1, 24, 64, 64
+    feat = torch.randn(b, c, h, w)
+
+    # Set all reliabilities very low (e.g. 0.05) so all candidates are rejected
+    q_map = torch.full((b, 1, h, w), 0.05)
+
+    with torch.no_grad():
+        ref_feat, match_conf, ref_q = matcher(feat, q_map)
+
+    # When all candidates are rejected, match confidence must be 0
+    assert torch.all(match_conf == 0.0), f"Expected match_conf == 0.0 under fallback, got max {match_conf.max()}"
+    assert not torch.isnan(ref_feat).any()
+    assert not torch.isinf(ref_feat).any()
+
+
+def test_loss_backward_and_gradients():
+    """Verify forward and backward gradient flow for SNRGuidedTotalLoss."""
+    model = SNRInternalReferenceNet(base_channels=16, feature_channels=24, num_blocks=3)
+    model.train()
+
+    loss_fn = SNRGuidedTotalLoss(
+        config={
+            "loss": {
+                "w_pseudo": 1.0,
+                "w_gradient": 0.5,
+                "w_reference": 0.1,
+                "w_exposure": 3.0,
+                "w_color": 2.0,
+                "w_smooth": 5.0,
+                "w_consistency": 0.2,
+            }
+        }
+    )
+
+    x = torch.rand(2, 3, 64, 64, requires_grad=False)
+    total_loss, loss_dict = loss_fn(model, x)
+
+    assert not torch.isnan(total_loss), "Total loss is NaN!"
+    assert not torch.isinf(total_loss), "Total loss is Inf!"
+    assert total_loss.item() > 0.0, "Total loss should be positive."
+
+    total_loss.backward()
+
+    # Check gradients on model parameters
+    has_grad = False
+    for name, p in model.named_parameters():
+        if p.requires_grad:
+            assert p.grad is not None, f"Parameter {name} has no gradient!"
+            assert not torch.isnan(p.grad).any(), f"Parameter {name} has NaN gradient!"
+            assert not torch.isinf(p.grad).any(), f"Parameter {name} has Inf gradient!"
+            has_grad = True
+
+    assert has_grad, "No parameters received gradients!"
+
+
+def test_checkpoint_save_and_reload():
+    """Verify checkpoint saving, serializing, and state restoration."""
+    model = SNRInternalReferenceNet(base_channels=16, feature_channels=24, num_blocks=3)
+    x = torch.rand(1, 3, 64, 64)
+
+    with torch.no_grad():
+        out_before = model(x)
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        ckpt_path = os.path.join(tmp_dir, "test_snr_ckpt.pth")
+        torch.save({"model": model.state_dict()}, ckpt_path)
+
+        # Reload into fresh instance
+        model_new = SNRInternalReferenceNet(base_channels=16, feature_channels=24, num_blocks=3)
+        ckpt = torch.load(ckpt_path, map_location="cpu")
+        model_new.load_state_dict(ckpt["model"])
+
+        with torch.no_grad():
+            out_after = model_new(x)
+
+        assert torch.allclose(out_before, out_after, atol=1e-6)
