@@ -31,28 +31,45 @@ from metrics.reference_metrics import ReferenceMetricsEvaluator
 from metrics.no_reference_metrics import evaluate_no_reference_metrics
 
 
-def evaluate_paired(model, val_loader, evaluator, device):
+def evaluate_paired(model, val_loader, evaluator, device, comparison_dir=None):
     model.eval()
     results = {"psnr": [], "ssim": [], "mse": [], "mae": []}
+    per_image = []
+    if comparison_dir is not None:
+        comparison_dir = Path(comparison_dir)
+        comparison_dir.mkdir(parents=True, exist_ok=True)
 
     for low, high, name in tqdm(val_loader, desc="Evaluating Paired"):
         low = low.to(device)
         high = high.to(device)
 
         with torch.no_grad():
-            b, c, h, w = low.shape
+            _, _, h, w = low.shape
             pad_w = (16 - (w % 16)) % 16
             pad_h = (16 - (h % 16)) % 16
             if pad_w > 0 or pad_h > 0:
                 low_pad = torch.nn.functional.pad(low, (0, pad_w, 0, pad_h), mode="reflect")
-                enhanced = model(low_pad)[:, :, :h, :w]
             else:
-                enhanced = model(low)
-            m = evaluator.evaluate(enhanced, high)
-            for k in results:
-                results[k].append(m[k])
+                low_pad = low
+            enhanced = model(low_pad)[:, :, :h, :w].clamp(0.0, 1.0)
+            metrics = evaluator.evaluate(enhanced, high.clamp(0.0, 1.0))
+            image_name = name[0] if isinstance(name, (tuple, list)) else str(name)
+            per_image.append({"image": image_name, **metrics})
+            for key in results:
+                results[key].append(metrics[key])
 
-    return {k: float(np.mean(v)) for k, v in results.items()}
+            if comparison_dir is not None:
+                residual = ((enhanced - high).abs() * 4.0).clamp(0.0, 1.0)
+                tiles = torch.cat([low.cpu(), enhanced.cpu(), high.cpu(), residual.cpu()], dim=0)
+                vutils.save_image(
+                    tiles,
+                    comparison_dir / f"{Path(image_name).stem}.png",
+                    nrow=4,
+                    normalize=False,
+                )
+
+    means = {key: float(np.mean(values)) for key, values in results.items()}
+    return means, per_image
 
 
 def main():
@@ -62,9 +79,16 @@ def main():
     parser.add_argument("--high_dir", type=str, default=None, help="Directory of reference images (if available)")
     parser.add_argument("--output_csv", type=str, default="experiments/evaluation_results.csv", help="CSV output")
     parser.add_argument("--device", type=str, default="auto", help="'auto', 'cpu', or 'cuda'")
+    parser.add_argument("--comparison_dir", type=str, default=None,
+                        help="Optional directory for input/output/reference/residual comparison images")
     args = parser.parse_args()
 
-    dev = torch.device("cuda" if (args.device == "auto" and torch.cuda.is_available()) else "cpu")
+    if args.device == "auto":
+        dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    else:
+        dev = torch.device(args.device)
+    if dev.type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA was requested but is not available.")
     print(f"[Evaluation] Running on device: {dev}")
 
     model = None
@@ -101,8 +125,20 @@ def main():
         dataset = PairedEvaluationDataset(args.low_dir, args.high_dir)
         loader = DataLoader(dataset, batch_size=1, shuffle=False)
         evaluator = ReferenceMetricsEvaluator(use_lpips=False, device=str(dev))
-        metrics = evaluate_paired(model, loader, evaluator, dev)
-        print(f"[Paired Metrics] PSNR: {metrics['psnr']:.2f} dB, SSIM: {metrics['ssim']:.4f}")
+        metrics, per_image = evaluate_paired(
+            model, loader, evaluator, dev, comparison_dir=args.comparison_dir
+        )
+        print(f"[Paired Metrics] {len(per_image)} images | PSNR: {metrics['psnr']:.2f} dB, "
+              f"SSIM: {metrics['ssim']:.4f}")
+        per_image_csv = out_csv.with_name(out_csv.stem + "_per_image.csv")
+        with per_image_csv.open("w", newline="", encoding="utf-8") as stream:
+            writer = csv.DictWriter(
+                stream, fieldnames=["image", "psnr", "ssim", "mse", "mae"],
+                extrasaction="ignore"
+            )
+            writer.writeheader()
+            writer.writerows(per_image)
+        print(f"[Evaluation] Per-image metrics saved to {per_image_csv}")
     else:
         print("[Notice] Reference images not provided. Evaluating no-reference statistical metrics.")
         # Unpaired evaluation
@@ -122,15 +158,28 @@ def main():
             "entropy": float(np.mean(entropies)),
             "rms_contrast": float(np.mean(contrasts)),
         }
+        per_image = []
         print(f"[Unpaired Metrics] Entropy: {metrics['entropy']:.2f}, RMS Contrast: {metrics['rms_contrast']:.4f}")
 
-    # Export to CSV
-    file_exists = out_csv.exists()
-    with open(out_csv, "a", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=["checkpoint", "low_dir", *metrics.keys()])
+    # Stable schema across paired and unpaired evaluations.
+    result_fields = [
+        "checkpoint", "low_dir", "high_dir", "num_images",
+        "psnr", "ssim", "mse", "mae", "entropy", "rms_contrast",
+    ]
+    file_exists = out_csv.exists() and out_csv.stat().st_size > 0
+    with out_csv.open("a", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=result_fields)
         if not file_exists:
             writer.writeheader()
-        writer.writerow({"checkpoint": args.checkpoint or "None", "low_dir": args.low_dir, **metrics})
+        row = {key: "" for key in result_fields}
+        row.update({
+            "checkpoint": args.checkpoint or "None",
+            "low_dir": args.low_dir,
+            "high_dir": args.high_dir or "",
+            "num_images": len(per_image) if args.high_dir else len(dataset),
+            **metrics,
+        })
+        writer.writerow(row)
     print(f"[Evaluation] Results saved to {out_csv}")
 
 
