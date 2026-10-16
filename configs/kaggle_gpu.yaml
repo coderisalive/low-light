@@ -22,7 +22,6 @@ training:
   weight_decay: 0.0001
   epochs: 35
   scheduler_gamma: 0.5
-  scheduler_step_size: 10
   scheduler_patience: 3
   min_learning_rate: 0.000001
   lr_min_delta: 0.01
