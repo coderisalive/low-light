@@ -371,7 +371,7 @@ def main() -> None:
         if "scaler" in checkpoint and use_amp:
             try:
                 scaler.load_state_dict(checkpoint["scaler"])
-            except (ValueError, RuntimeError) as error:
+            except (ValueError, RuntimeError, KeyError) as error:
                 print(f"[Resume] AMP scaler state reset: {error}")
         start_epoch = int(checkpoint.get("epoch", 0)) + 1
         if checkpoint.get("validation_protocol") == VALIDATION_PROTOCOL:
