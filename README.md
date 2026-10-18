@@ -127,6 +127,17 @@ python -u scripts/train_rgb_restoration.py \
 - `--sampling_mode proportional`: Samples uniformly from all available images in proportion to dataset sizes.
 - `--sampling_mode weighted --dataset_weights lol_v1:1.0,lol_v2_real:1.5,lol_v2_synthetic:0.5`: Applies custom sampling multipliers.
 
+### Full Epoch Training (Disabling Early Stopping)
+Agar aapko pure epochs bina ruke train karna hai (bina early stopping ke), to `--no_early_stopping` flag pass karein:
+```bash
+python -u scripts/train_rgb_restoration.py \
+  --lolv1_root /kaggle/working/lol_compat \
+  --lolv2_real_root /kaggle/input/lolv2-dataset/LOL-v2-Real \
+  --lolv2_synthetic_root /kaggle/input/lolv2-dataset/LOL-v2-Synthetic \
+  --epochs 35 \
+  --no_early_stopping
+```
+
 ### Data Leakage Prevention Rules
 - The trainer carves a deterministic validation split (default 10%) out of the training pools only.
 - Official test sets (`eval15`, `LOL-v2-Real Test`, `LOL-v2-Synthetic Test`) are strictly isolated and never loaded during training or checkpoint selection.

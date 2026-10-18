@@ -202,6 +202,8 @@ def main() -> None:
     parser.add_argument("--num_workers", type=int, default=2)
     parser.add_argument("--validation_fraction", type=float, default=0.10)
     parser.add_argument("--patience", type=int, default=6)
+    parser.add_argument("--no_early_stopping", action="store_true", default=False,
+                        help="Disable early stopping and train through all epochs without interruption.")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max_train_batches", type=int, default=None)
     parser.add_argument("--output_dir", default=None, type=str, help="Destination directory for experiment artifacts.")
@@ -209,7 +211,7 @@ def main() -> None:
 
     if args.epochs < 1 or args.batch_size < 1 or args.crop_size < 32:
         raise ValueError("epochs/batch_size must be positive and crop_size >= 32.")
-    if args.lr <= 0 or args.patience < 1 or args.base_channels < 8:
+    if args.lr <= 0 or (not args.no_early_stopping and args.patience < 1) or args.base_channels < 8:
         raise ValueError("lr/patience/base_channels are invalid.")
     if not 0.05 <= args.validation_fraction < 0.5:
         raise ValueError("validation_fraction must be in [0.05, 0.5).")
@@ -426,7 +428,7 @@ def main() -> None:
             writer.writeheader()
             writer.writerows(history)
 
-        if bad_epochs >= args.patience:
+        if not args.no_early_stopping and args.patience > 0 and bad_epochs >= args.patience:
             print(f"[Early Stopping] Validation loss did not improve for {args.patience} epochs.")
             break
 
