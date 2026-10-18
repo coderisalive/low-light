@@ -23,8 +23,9 @@ jobs:
           pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision
       - name: Install test dependencies
         run: pip install numpy Pillow PyYAML tqdm pytest
-      - name: Compile changed Python files
+      - name: Compile model and training files
         run: |
-          python -m py_compile scripts/train_kaggle.py scripts/evaluate.py models/snr_internal_reference_net.py losses/snr_guided_losses.py datasets/paired_evaluation_dataset.py scripts/finetune_chrominance.py
-      - name: Run SNR-guided unit tests
-        run: python -m pytest tests/test_snr_guided.py tests/test_chrominance_finetune.py -q
+          python -m py_compile scripts/train_kaggle.py scripts/evaluate.py models/snr_internal_reference_net.py losses/snr_guided_losses.py datasets/paired_evaluation_dataset.py
+          python -m py_compile models/paired_rgb_restoration_net.py losses/paired_rgb_restoration.py scripts/train_rgb_restoration.py scripts/evaluate_rgb_restoration.py
+      - name: Run stability and paired restoration tests
+        run: python -m pytest tests/test_snr_guided.py tests/test_paired_rgb_restoration.py -q
