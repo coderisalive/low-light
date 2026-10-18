@@ -388,12 +388,11 @@ class ConservativeEnhancementHead(nn.Module):
     Module E: Conservative Chromaticity-Preserving Enhancement Head (Phase 5).
     1. Illumination Map L in [eps, 1.0].
     2. Base Retinex luminance correction: Y_base = Y_in / (L^gamma + eps).
-    3. Proportional Chrominance Scaling:
-       CbCr_base = CbCr_in * (Y_base / (Y_in + eps))^0.65
-       Preserves vivid, authentic chromaticity without muted grey/beige washouts.
+    3. Retain the original chroma as a neutral baseline; predict a learned
+       bounded chroma residual rather than applying a fixed luminance-based gain.
     4. Bounded residual refinement in YCbCr:
        Y_out = clamp(Y_base + alpha * (1 - 0.5 Q) * Delta_Y, 0.0, 1.0)
-       CbCr_out = CbCr_base + beta * (1 - 0.5 Q) * Delta_C
+       CbCr_out = CbCr_in + beta * (1 - 0.5 Q) * Delta_C
        I_enh = ycbcr_to_rgb(Y_out, CbCr_out)
     """
 
@@ -488,26 +487,16 @@ class ConservativeEnhancementHead(nn.Module):
         delta_y = self.head_lum(feat_fused)
         delta_c = self.head_chrom(feat_fused)
 
-        # 5. Reliability-aware chrominance restoration.
-        # Stronger than the previous sqrt(gain) rule, but bounded and attenuated
-        # in unreliable pixels so lifting chroma does not blindly amplify noise.
-        lum_gain = self.adaptive_chrominance_gain(
-            y_orig=y_orig,
-            y_base=y_base,
-            q_map=q_map,
-            eps=self.eps,
-        )
-        cbcr_scaled = cbcr_orig * lum_gain
-
-        # 6. Reliability-modulated bounded updates
+        # 5. Keep the input chroma as the neutral baseline and let the learned
+        # residual head estimate image-dependent color corrections. Do not apply
+        # a hand-crafted luminance-based chroma gain during inference.
         mod_weight = 1.0 - 0.5 * torch.clamp(q_map, 0.0, 1.0)
         y_out = torch.clamp(y_base + torch.abs(self.alpha) * mod_weight * delta_y, 0.0, 1.0)
-        cbcr_out = cbcr_scaled + self.beta * mod_weight * delta_c
+        cbcr_out = cbcr_orig + self.beta * mod_weight * delta_c
 
-        # 7. Gamut-aware inverse conversion. Uniformly reduce chroma only as
-        # much as needed to keep RGB in range, avoiding per-channel clipping
-        # that can shift hue and make restored colors look unnatural.
-        enhanced_rgb = ColorSpaceConverter.ycbcr_to_rgb_gamut_safe(y_out, cbcr_out)
+        # Use the standard inverse conversion; paired full-network training can
+        # learn the chroma residual jointly with the luminance and feature path.
+        enhanced_rgb = ColorSpaceConverter.ycbcr_to_rgb(y_out, cbcr_out)
 
         return enhanced_rgb, illum, delta_y, delta_c
 
