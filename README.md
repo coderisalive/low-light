@@ -94,6 +94,25 @@ pip install -r requirements.txt
 
 ---
 
+## Downloading Datasets
+
+A turnkey downloader script is included to automatically fetch and organize **LOL-v2 Real**, **LOL-v2 Synthetic**, and **ExDark**:
+
+```bash
+# Install Hugging Face datasets library (if not already installed)
+pip install datasets huggingface_hub
+
+# Download LOL-v2 Real & Synthetic and ExDark into data/
+python scripts/download_lolv2.py --output_root data/ --datasets all
+```
+
+On Kaggle, you can run:
+```bash
+python scripts/download_lolv2.py --output_root /kaggle/working/datasets/ --datasets all
+```
+
+---
+
 ## Training
 
 ### Multi-Dataset Training (LOL-v1 + LOL-v2-Real + LOL-v2-Synthetic)
