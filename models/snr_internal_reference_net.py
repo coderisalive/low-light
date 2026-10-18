@@ -247,11 +247,14 @@ class InternalReferenceMatcher(nn.Module):
         # Combined validity mask
         valid_mask = (~diag_mask) & ref_valid  # (B, M, M)
 
-        # Masked similarity with safe floor
+        # Keep masked similarities and the temperature softmax in FP32.
+        # In FP16, -1e4 / temperature can overflow to -inf; rows with no valid
+        # candidates can then produce softmax(NaN) when every score is -inf.
+        sim_fp32 = sim.float()
         masked_sim = torch.where(
             valid_mask,
-            sim,
-            torch.full_like(sim, -1e4),
+            sim_fp32,
+            torch.full_like(sim_fp32, -1e4),
         )
 
         # 5. Top-K Selection with safe normalization
@@ -261,8 +264,10 @@ class InternalReferenceMatcher(nn.Module):
         # Check if valid candidates actually exist
         has_valid_candidates = (topk_sim > -100.0).any(dim=-1, keepdim=True)  # (B, M, 1)
 
-        # Temperature-scaled softmax over Top-K
-        topk_weights = F.softmax(topk_sim / self.temperature, dim=-1)  # (B, M, K)
+        # Temperature-scaled FP32 softmax; explicitly zero rows with no valid refs.
+        topk_weights = F.softmax(topk_sim / self.temperature, dim=-1)
+        topk_weights = topk_weights * has_valid_candidates.to(topk_weights.dtype)
+        topk_weights = topk_weights.to(dtype=v_tokens.dtype)
 
         # Gather Top-K value tokens and Top-K reliabilities via vectorized indexing
         batch_idx = torch.arange(b, device=feat.device).view(b, 1, 1).expand(-1, m, k_val)
