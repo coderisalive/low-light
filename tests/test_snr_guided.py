@@ -335,3 +335,26 @@ def test_adaptive_chrominance_gain_restores_color_with_reliability_gating():
     assert torch.all(gain_high > gain_low)
     assert torch.all(gain_high <= 6.0 ** 0.70 + 1e-5)
 
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA FP16 autocast")
+def test_reference_matcher_fp16_autocast_fallback_is_finite():
+    """All-invalid reference rows must stay finite under GPU FP16 autocast."""
+    matcher = InternalReferenceMatcher(
+        feature_channels=24,
+        patch_size=16,
+        top_k=2,
+        min_ref_reliability=0.50,
+        similarity_threshold=0.30,
+    ).cuda().eval()
+
+    feat = torch.randn(1, 24, 64, 64, device="cuda")
+    q_map = torch.zeros(1, 1, 64, 64, device="cuda")
+
+    with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.float16):
+        ref_feat, match_conf, ref_q = matcher(feat, q_map)
+
+    assert torch.isfinite(ref_feat).all()
+    assert torch.isfinite(match_conf).all()
+    assert torch.isfinite(ref_q).all()
+    assert torch.count_nonzero(match_conf).item() == 0
+
