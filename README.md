@@ -24,50 +24,72 @@ The repository supports multi-dataset training and multi-benchmark testing acros
 
 ---
 
-## Dataset Directory Layouts
+## Dataset Directory Layouts & Paths in Code
 
-Datasets should be stored outside the Git repository (e.g. under `data/` or a custom path).
+Datasets can be stored locally under `data/` or in custom directories (e.g. `/kaggle/working/data/` or `/kaggle/input/...`).
 
-### 1. LOL-v1
+### Exact Code References (Kahan Code Mein Paths Define Hain)
+
+The dataset paths and subfolder discovery logic are defined in the following files:
+
+| Dataset / Feature | Source File | Functions & CLI Arguments | Default Paths / Discovery Behavior |
+| :--- | :--- | :--- | :--- |
+| **LOL-v1** | [`datasets/multi_dataset.py`](file:///c:/Users/bitpa/OneDrive/Desktop/Minor%20Project%20Code/my%20method%2001/datasets/multi_dataset.py#L226) | `discover_lol_v1_paths(root)` | Looks for `our485/low` & `high`, and `eval15/low` & `high`. |
+| **LOL-v2-Real** | [`datasets/multi_dataset.py`](file:///c:/Users/bitpa/OneDrive/Desktop/Minor%20Project%20Code/my%20method%2001/datasets/multi_dataset.py#L249) | `discover_lol_v2_real_paths(root)` | Resolves `Real_captured/` or `_hf_raw/` with `Train/Input` (or `Low`) and `GT` (or `Normal`), and `Test/Input` & `GT`. |
+| **LOL-v2-Synthetic** | [`datasets/multi_dataset.py`](file:///c:/Users/bitpa/OneDrive/Desktop/Minor%20Project%20Code/my%20method%2001/datasets/multi_dataset.py#L274) | `discover_lol_v2_synthetic_paths(root)` | Resolves `Synthetic/` or `_hf_raw/` with `Train/Input` (or `Low`) and `GT` (or `Normal`), and `Test/Input` & `GT`. |
+| **ExDark** | [`datasets/exdark_dataset.py`](file:///c:/Users/bitpa/OneDrive/Desktop/Minor%20Project%20Code/my%20method%2001/datasets/exdark_dataset.py#L70) | `ExDarkDataset(root, split)` | Searches for `Groundtruth/imageclasslist.txt` or scans 12 class subdirectories (`Bicycle/`, `Car/`, etc.). |
+| **Training Paths** | [`scripts/train_rgb_restoration.py`](file:///c:/Users/bitpa/OneDrive/Desktop/Minor%20Project%20Code/my%20method%2001/scripts/train_rgb_restoration.py#L186) | `--lolv1_root`<br>`--lolv2_real_root`<br>`--lolv2_synthetic_root` | Auto-detects `data/lol_dataset`, `data/lol_v1`, `data/LOL-v2-Real`, and `data/LOL-v2-Synthetic` if not specified. |
+| **Evaluation Paths** | [`scripts/evaluate_rgb_restoration.py`](file:///c:/Users/bitpa/OneDrive/Desktop/Minor%20Project%20Code/my%20method%2001/scripts/evaluate_rgb_restoration.py#L240) | `--lolv1_root`<br>`--lolv2_real_root`<br>`--lolv2_synthetic_root`<br>`--exdark_root` | Runs benchmark evaluation on isolated official test sets. |
+| **Downloader** | [`scripts/download_lolv2.py`](file:///c:/Users/bitpa/OneDrive/Desktop/Minor%20Project%20Code/my%20method%2001/scripts/download_lolv2.py#L134) | `--output_root data` | Downloads to `data/LOL-v2-Real`, `data/LOL-v2-Synthetic`, and `data/ExDark`. |
+
+---
+
+### Folder Structures Recognized by the Code
+
+#### 1. LOL-v1 (`data/lol_dataset` or `data/lol_v1`)
+Code handles either folder name automatically:
 ```text
-data/lol_v1/
+data/lol_dataset/   (or data/lol_v1/)
 ├── our485/
-│   ├── low/
-│   └── high/
+│   ├── low/        # 486 training low-light images
+│   └── high/       # 486 normal-light ground truth targets
 └── eval15/
-    ├── low/
-    └── high/
+    ├── low/        # 15 official test low-light images
+    └── high/       # 15 official test ground truth targets
 ```
 
-### 2. LOL-v2-Real
+#### 2. LOL-v2-Real (`data/LOL-v2-Real`)
+The loader automatically supports both official and HuggingFace structures (`Input`/`GT` or `Low`/`Normal`):
 ```text
 data/LOL-v2-Real/
 └── Real_captured/
-    ├── Train/
-    │   ├── Low/
-    │   └── Normal/
-    └── Test/
-        ├── Low/
-        └── Normal/
+    └── _hf_raw/    (or direct Train/ and Test/)
+        ├── Train/
+        │   ├── Input/ (or Low/)     # 689 training low-light images
+        │   └── GT/    (or Normal/)  # 689 normal-light ground truth targets
+        └── Test/
+            ├── Input/ (or Low/)     # 100 official test low-light images
+            └── GT/    (or Normal/)  # 100 official test ground truth targets
 ```
 
-### 3. LOL-v2-Synthetic
+#### 3. LOL-v2-Synthetic (`data/LOL-v2-Synthetic`)
 ```text
 data/LOL-v2-Synthetic/
 └── Synthetic/
-    ├── Train/
-    │   ├── Low/
-    │   └── Normal/
-    └── Test/
-        ├── Low/
-        └── Normal/
+    └── _hf_raw/    (or direct Train/ and Test/)
+        ├── Train/
+        │   ├── Input/ (or Low/)     # 900 training low-light images
+        │   └── GT/    (or Normal/)  # 900 normal-light ground truth targets
+        └── Test/
+            ├── Input/ (or Low/)     # 100 official test low-light images
+            └── GT/    (or Normal/)  # 100 official test ground truth targets
 ```
 
-### 4. ExDark
+#### 4. ExDark (`data/ExDark`)
 ```text
 data/ExDark/
 ├── Groundtruth/
-│   └── imageclasslist.txt      # (Optional official train/val/test split)
+│   └── imageclasslist.txt           # Official train/val/test split annotations
 ├── Bicycle/
 ├── Boat/
 ├── Bottle/
@@ -120,7 +142,7 @@ Train on all three paired datasets simultaneously with balanced sampling:
 
 ```bash
 python -u scripts/train_rgb_restoration.py \
-  --lolv1_root data/lol_v1 \
+  --lolv1_root data/lol_dataset \
   --lolv2_real_root data/LOL-v2-Real \
   --lolv2_synthetic_root data/LOL-v2-Synthetic \
   --sampling_mode balanced \
