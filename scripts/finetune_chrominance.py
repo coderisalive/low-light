@@ -50,8 +50,9 @@ def paired_restoration_loss(
     w_chrominance: float = 2.0,
     w_gradient: float = 0.2,
     w_color_angle: float = 0.1,
+    w_contrast: float = 0.2,
 ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
-    """Paired loss that explicitly rewards color fidelity and preserves structure."""
+    """Paired RGB/chroma loss with local luminance-contrast preservation."""
     prediction = prediction.clamp(0.0, 1.0)
     target = target.clamp(0.0, 1.0)
 
@@ -61,6 +62,16 @@ def paired_restoration_loss(
     l_rgb = F.l1_loss(prediction, target)
     l_luminance = F.l1_loss(pred_y, target_y)
     l_chrominance = F.l1_loss(pred_cbcr, target_cbcr)
+
+    # Match local luminance contrast at patch scale to help prevent flat results.
+    contrast_patch = min(16, prediction.shape[-2], prediction.shape[-1])
+
+    def local_luminance_std(y: torch.Tensor) -> torch.Tensor:
+        local_mean = F.avg_pool2d(y, kernel_size=contrast_patch, stride=contrast_patch)
+        local_mean_sq = F.avg_pool2d(y.square(), kernel_size=contrast_patch, stride=contrast_patch)
+        return torch.sqrt((local_mean_sq - local_mean.square()).clamp_min(0.0) + 1e-6)
+
+    l_contrast = F.l1_loss(local_luminance_std(pred_y), local_luminance_std(target_y))
 
     pred_dx = pred_y[:, :, :, 1:] - pred_y[:, :, :, :-1]
     targ_dx = target_y[:, :, :, 1:] - target_y[:, :, :, :-1]
@@ -79,6 +90,7 @@ def paired_restoration_loss(
         + w_chrominance * l_chrominance
         + w_gradient * l_gradient
         + w_color_angle * l_color_angle
+        + w_contrast * l_contrast
     )
     terms = {
         "loss_total": total,
@@ -87,6 +99,7 @@ def paired_restoration_loss(
         "loss_chrominance": l_chrominance,
         "loss_gradient": l_gradient,
         "loss_color_angle": l_color_angle,
+        "loss_contrast": l_contrast,
     }
     return total, terms
 
@@ -109,6 +122,7 @@ def evaluate(
     device: torch.device,
     comparison_dir: Path = None,
     max_comparisons: int = 5,
+    loss_weights: Dict[str, float] = None,
 ) -> Tuple[Dict[str, float], list]:
     model.eval()
     rows = []
@@ -120,9 +134,19 @@ def evaluate(
         high = high.to(device, non_blocking=True)
         _, _, h, w = low.shape
         prediction = model(pad_to_multiple(low))[:, :, :h, :w].clamp(0.0, 1.0)
-        metrics = evaluator.evaluate(prediction, high.clamp(0.0, 1.0))
+        target = high.clamp(0.0, 1.0)
+        metrics = evaluator.evaluate(prediction, target)
+        paired_loss, loss_terms = paired_restoration_loss(
+            prediction, target, **(loss_weights or {})
+        )
         image_name = name[0] if isinstance(name, (list, tuple)) else str(name)
-        rows.append({"image": image_name, **metrics})
+        rows.append({
+            "image": image_name,
+            **metrics,
+            "paired_loss": float(paired_loss.item()),
+            "loss_chrominance": float(loss_terms["loss_chrominance"].item()),
+            "loss_contrast": float(loss_terms["loss_contrast"].item()),
+        })
 
         if comparison_dir is not None and index < max_comparisons:
             residual = ((prediction - high).abs() * 4.0).clamp(0.0, 1.0)
@@ -140,7 +164,8 @@ def evaluate(
         raise RuntimeError("Validation loader produced zero paired images.")
     summary = {
         key: float(np.mean([row[key] for row in rows]))
-        for key in ("psnr", "ssim", "mse", "mae")
+        for key in ("psnr", "ssim", "mse", "mae", "paired_loss",
+                    "loss_chrominance", "loss_contrast")
     }
     return summary, rows
 
@@ -193,7 +218,10 @@ def write_per_image_metrics(path: Path, epoch: int, rows: list) -> None:
     """Save metrics for the exact checkpoint currently selected as best."""
     with path.open("w", newline="", encoding="utf-8") as stream:
         writer = csv.DictWriter(
-            stream, fieldnames=["epoch", "image", "psnr", "ssim", "mse", "mae"]
+            stream, fieldnames=[
+                "epoch", "image", "psnr", "ssim", "mse", "mae",
+                "paired_loss", "loss_chrominance", "loss_contrast",
+            ]
         )
         writer.writeheader()
         for row in rows:
@@ -204,6 +232,9 @@ def write_per_image_metrics(path: Path, epoch: int, rows: list) -> None:
                 "ssim": row["ssim"],
                 "mse": row["mse"],
                 "mae": row["mae"],
+                "paired_loss": row["paired_loss"],
+                "loss_chrominance": row["loss_chrominance"],
+                "loss_contrast": row["loss_contrast"],
             })
 
 
@@ -231,6 +262,7 @@ def main() -> None:
     parser.add_argument("--w_chrominance", type=float, default=2.0)
     parser.add_argument("--w_gradient", type=float, default=0.2)
     parser.add_argument("--w_color_angle", type=float, default=0.1)
+    parser.add_argument("--w_contrast", type=float, default=0.2)
     args = parser.parse_args()
 
     if args.epochs < 1 or args.batch_size < 1 or args.crop_size < 16:
@@ -318,6 +350,14 @@ def main() -> None:
     )
 
     evaluator = ReferenceMetricsEvaluator(use_lpips=False, device=str(device))
+    loss_weights = {
+        "w_rgb": args.w_rgb,
+        "w_luminance": args.w_luminance,
+        "w_chrominance": args.w_chrominance,
+        "w_gradient": args.w_gradient,
+        "w_color_angle": args.w_color_angle,
+        "w_contrast": args.w_contrast,
+    }
     output_root = Path("/kaggle/working/experiments") if Path("/kaggle/working").exists() else project / "experiments"
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     exp_dir = output_root / f"chroma_finetune_{stamp}"
@@ -334,7 +374,8 @@ def main() -> None:
     model.eval()
     initial_metrics, initial_rows = evaluate(
         model, val_loader, evaluator, device,
-        comparison_dir=comparisons_dir, max_comparisons=8
+        comparison_dir=comparisons_dir, max_comparisons=8,
+        loss_weights=loss_weights
     )
     print(
         f"[Initial held-out] PSNR={initial_metrics['psnr']:.3f} dB | "
@@ -342,15 +383,15 @@ def main() -> None:
     )
     optimizer = torch.optim.AdamW(trainable, lr=args.lr, weight_decay=1e-5)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="max", factor=0.5, patience=2,
-        threshold=0.005, threshold_mode="abs", min_lr=1e-7,
+        optimizer, mode="min", factor=0.5, patience=2,
+        threshold=1e-5, threshold_mode="abs", min_lr=1e-7,
     )
     save_checkpoint(
         exp_dir / "initial_checkpoint.pth", model, optimizer, scheduler,
         config, 0, initial_metrics, str(checkpoint_path)
     )
     write_per_image_metrics(per_image_csv, 0, initial_rows)
-    best_psnr = initial_metrics["psnr"]
+    best_paired_loss = initial_metrics["paired_loss"]
     best_metrics = dict(initial_metrics)
     best_epoch = 0
     bad_epochs = 0
@@ -370,12 +411,16 @@ def main() -> None:
         "loss_chrominance": "",
         "loss_gradient": "",
         "loss_color_angle": "",
+        "loss_contrast": "",
         "val_psnr": initial_metrics["psnr"],
         "val_ssim": initial_metrics["ssim"],
         "val_mse": initial_metrics["mse"],
         "val_mae": initial_metrics["mae"],
+        "val_paired_loss": initial_metrics["paired_loss"],
+        "val_chrominance_loss": initial_metrics["loss_chrominance"],
+        "val_contrast_loss": initial_metrics["loss_contrast"],
         "lr": args.lr,
-        "best_psnr": best_psnr,
+        "best_paired_loss": best_paired_loss,
     }]
 
     for epoch in range(1, args.epochs + 1):
@@ -434,13 +479,15 @@ def main() -> None:
         means = {key: value / steps for key, value in sums.items()}
 
         model.eval()
-        val_metrics, val_rows = evaluate(model, val_loader, evaluator, device)
-        scheduler.step(val_metrics["psnr"])
+        val_metrics, val_rows = evaluate(
+            model, val_loader, evaluator, device, loss_weights=loss_weights
+        )
+        scheduler.step(val_metrics["paired_loss"])
         lr_now = float(optimizer.param_groups[0]["lr"])
 
-        improved = val_metrics["psnr"] > best_psnr + 0.001
+        improved = val_metrics["paired_loss"] < best_paired_loss - 1e-5
         if improved:
-            best_psnr = val_metrics["psnr"]
+            best_paired_loss = val_metrics["paired_loss"]
             best_metrics = dict(val_metrics)
             best_epoch = epoch
             bad_epochs = 0
@@ -448,14 +495,15 @@ def main() -> None:
                 best_checkpoint, model, optimizer, scheduler, config, epoch,
                 best_metrics, str(checkpoint_path)
             )
-            torch.save(torch.load(best_checkpoint, map_location="cpu"), exported_best)
+            shutil.copy2(best_checkpoint, exported_best)
             # Keep per-image metrics and visualizations aligned with the best checkpoint.
             write_per_image_metrics(per_image_csv, epoch, val_rows)
             for old in comparisons_dir.glob("*.png"):
                 old.unlink()
             _, _ = evaluate(
                 model, val_loader, evaluator, device,
-                comparison_dir=comparisons_dir, max_comparisons=8
+                comparison_dir=comparisons_dir, max_comparisons=8,
+                loss_weights=loss_weights
             )
         else:
             bad_epochs += 1
@@ -469,12 +517,16 @@ def main() -> None:
             "loss_chrominance": means["loss_chrominance"],
             "loss_gradient": means["loss_gradient"],
             "loss_color_angle": means["loss_color_angle"],
+            "loss_contrast": means["loss_contrast"],
             "val_psnr": val_metrics["psnr"],
             "val_ssim": val_metrics["ssim"],
             "val_mse": val_metrics["mse"],
             "val_mae": val_metrics["mae"],
+            "val_paired_loss": val_metrics["paired_loss"],
+            "val_chrominance_loss": val_metrics["loss_chrominance"],
+            "val_contrast_loss": val_metrics["loss_contrast"],
             "lr": lr_now,
-            "best_psnr": best_psnr,
+            "best_paired_loss": best_paired_loss,
         }
         history.append(row)
         save_checkpoint(
@@ -489,20 +541,26 @@ def main() -> None:
         print(
             f"Epoch {epoch:02d}/{args.epochs} | loss={means['loss_total']:.5f} | "
             f"RGB={means['loss_rgb']:.5f} | Chroma={means['loss_chrominance']:.5f} | "
-            f"Val PSNR={val_metrics['psnr']:.3f} dB | SSIM={val_metrics['ssim']:.4f} | "
+            f"Val objective={val_metrics['paired_loss']:.5f} | "
+            f"val chroma={val_metrics['loss_chrominance']:.5f} | "
+            f"val contrast={val_metrics['loss_contrast']:.5f} | "
+            f"PSNR={val_metrics['psnr']:.3f} dB | SSIM={val_metrics['ssim']:.4f} | "
             f"LR={lr_now:.2e} | best={best_epoch} | patience={bad_epochs}/{args.patience}"
             + (" [BEST]" if improved else "")
         )
 
         if not improved and bad_epochs >= args.patience:
-            print(f"[Early stopping] Validation PSNR did not improve for {bad_epochs} epochs.")
+            print(f"[Early stopping] Paired RGB/chroma/contrast objective did not improve for {bad_epochs} epochs.")
             break
 
     print("=" * 78)
     print(f"[Complete] Best epoch: {best_epoch}")
-    print(f"[Complete] Best validation PSNR: {best_metrics['psnr']:.3f} dB")
-    print(f"[Complete] SSIM at selected epoch: {best_metrics['ssim']:.4f}")
-    print(f"[Complete] MAE at selected epoch: {best_metrics['mae']:.5f}")
+    print(f"[Complete] Best held-out paired objective: {best_paired_loss:.5f}")
+    print(f"[Complete] PSNR at selected checkpoint: {best_metrics['psnr']:.3f} dB")
+    print(f"[Complete] SSIM at selected checkpoint: {best_metrics['ssim']:.4f}")
+    print(f"[Complete] Chroma L1 at selected checkpoint: {best_metrics['loss_chrominance']:.5f}")
+    print(f"[Complete] Local contrast loss at selected checkpoint: {best_metrics['loss_contrast']:.5f}")
+    print(f"[Complete] MAE at selected checkpoint: {best_metrics['mae']:.5f}")
     print(f"[Complete] Best checkpoint: {best_checkpoint}")
     print(f"[Complete] Portable best checkpoint: {exported_best}")
     print(f"[Complete] History: {history_csv}")
