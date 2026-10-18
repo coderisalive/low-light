@@ -224,6 +224,8 @@ def main() -> None:
     parser.add_argument("--validation_fraction", type=float, default=0.10)
     parser.add_argument("--patience", type=int, default=6)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--max_train_batches", type=int, default=None,
+                        help="Optional smoke-test limit; omit for full training")
     parser.add_argument("--w_rgb", type=float, default=1.0)
     parser.add_argument("--w_luminance", type=float, default=0.5)
     parser.add_argument("--w_chrominance", type=float, default=2.0)
@@ -235,6 +237,8 @@ def main() -> None:
         raise ValueError("epochs/batch_size must be positive and crop_size >= 16.")
     if args.lr <= 0:
         raise ValueError("--lr must be positive.")
+    if args.max_train_batches is not None and args.max_train_batches < 1:
+        raise ValueError("--max_train_batches must be positive when supplied.")
     if not 0.05 <= args.validation_fraction < 0.5:
         raise ValueError("--validation_fraction must be in [0.05, 0.5).")
 
@@ -328,7 +332,10 @@ def main() -> None:
 
     # Record initial checkpoint performance on the same held-out validation split.
     model.eval()
-    initial_metrics, initial_rows = evaluate(model, val_loader, evaluator, device)
+    initial_metrics, initial_rows = evaluate(
+        model, val_loader, evaluator, device,
+        comparison_dir=comparisons_dir, max_comparisons=8
+    )
     print(
         f"[Initial held-out] PSNR={initial_metrics['psnr']:.3f} dB | "
         f"SSIM={initial_metrics['ssim']:.4f} | MAE={initial_metrics['mae']:.5f}"
@@ -379,7 +386,7 @@ def main() -> None:
         steps = 0
         pbar = tqdm(train_loader, desc=f"Fine-tune {epoch:02d}/{args.epochs}", leave=False)
 
-        for low, high, _ in pbar:
+        for batch_index, (low, high, _) in enumerate(pbar, start=1):
             low = low.to(device, non_blocking=True)
             high = high.to(device, non_blocking=True)
 
@@ -418,6 +425,9 @@ def main() -> None:
                 rgb=f"{terms['loss_rgb'].item():.4f}",
                 chroma=f"{terms['loss_chrominance'].item():.4f}",
             )
+            if args.max_train_batches is not None and batch_index >= args.max_train_batches:
+                print(f"[Smoke test] Stopping after {batch_index} training batches as requested.")
+                break
 
         if steps == 0:
             raise RuntimeError("Training DataLoader produced no batches.")
