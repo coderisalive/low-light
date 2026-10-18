@@ -25,6 +25,6 @@ jobs:
         run: pip install numpy Pillow PyYAML tqdm pytest
       - name: Compile changed Python files
         run: |
-          python -m py_compile scripts/train_kaggle.py scripts/evaluate.py models/snr_internal_reference_net.py losses/snr_guided_losses.py datasets/paired_evaluation_dataset.py
+          python -m py_compile scripts/train_kaggle.py scripts/evaluate.py models/snr_internal_reference_net.py losses/snr_guided_losses.py datasets/paired_evaluation_dataset.py scripts/finetune_chrominance.py
       - name: Run SNR-guided unit tests
-        run: python -m pytest tests/test_snr_guided.py -q
+        run: python -m pytest tests/test_snr_guided.py tests/test_chrominance_finetune.py -q
