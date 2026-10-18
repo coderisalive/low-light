@@ -431,6 +431,26 @@ class ConservativeEnhancementHead(nn.Module):
             nn.Tanh(),
         )
 
+    @staticmethod
+    def adaptive_chrominance_gain(
+        y_orig: torch.Tensor,
+        y_base: torch.Tensor,
+        q_map: torch.Tensor,
+        eps: float = 1e-4,
+    ) -> torch.Tensor:
+        """Restore chroma in proportion to illumination recovery, gated by reliability.
+
+        The gain is bounded by 6**0.70 (~3.51). A nonzero reliability floor
+        allows some color recovery in dark regions, while higher-confidence
+        pixels receive the full gain. q_map is detached so the model cannot
+        reduce this chroma correction by gaming its reliability prediction.
+        """
+        illumination_ratio = ((y_base + eps) / (y_orig + eps)).clamp(1.0, 6.0)
+        requested_gain = illumination_ratio.pow(0.70)
+        reliability = q_map.detach().clamp(0.0, 1.0)
+        chroma_confidence = 0.45 + 0.55 * reliability
+        return 1.0 + chroma_confidence * (requested_gain - 1.0)
+
     def forward(
         self,
         feat_fused: torch.Tensor,
@@ -463,11 +483,15 @@ class ConservativeEnhancementHead(nn.Module):
         delta_y = self.head_lum(feat_fused)
         delta_c = self.head_chrom(feat_fused)
 
-        # 5. Proportional Chrominance Scaling (prevents muted/washed-out grey cast)
-        # Scaled smoothly with luminance gain ratio: (y_base / y_orig)^0.65
-        # Keep chroma amplification conservative in very dark regions. Large gains
-        # amplify chroma noise and can create color casts after RGB clipping.
-        lum_gain = torch.clamp((y_base + self.eps) / (y_orig + self.eps), 1.0, 4.0) ** 0.50
+        # 5. Reliability-aware chrominance restoration.
+        # Stronger than the previous sqrt(gain) rule, but bounded and attenuated
+        # in unreliable pixels so lifting chroma does not blindly amplify noise.
+        lum_gain = self.adaptive_chrominance_gain(
+            y_orig=y_orig,
+            y_base=y_base,
+            q_map=q_map,
+            eps=self.eps,
+        )
         cbcr_scaled = cbcr_orig * lum_gain
 
         # 6. Reliability-modulated bounded updates
@@ -475,8 +499,10 @@ class ConservativeEnhancementHead(nn.Module):
         y_out = torch.clamp(y_base + torch.abs(self.alpha) * mod_weight * delta_y, 0.0, 1.0)
         cbcr_out = cbcr_scaled + self.beta * mod_weight * delta_c
 
-        # 7. Invertible color conversion back to RGB
-        enhanced_rgb = ColorSpaceConverter.ycbcr_to_rgb(y_out, cbcr_out)
+        # 7. Gamut-aware inverse conversion. Uniformly reduce chroma only as
+        # much as needed to keep RGB in range, avoiding per-channel clipping
+        # that can shift hue and make restored colors look unnatural.
+        enhanced_rgb = ColorSpaceConverter.ycbcr_to_rgb_gamut_safe(y_out, cbcr_out)
 
         return enhanced_rgb, illum, delta_y, delta_c
 
