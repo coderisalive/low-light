@@ -109,10 +109,10 @@ def download_exdark(dest_dir: Path):
     dest_dir = Path(dest_dir)
     dest_dir.mkdir(parents=True, exist_ok=True)
     print(f"\n[Download] Fetching ExDark dataset into {dest_dir}...")
-    zip_url = "https://github.com/cs-chan/ExDark/archive/refs/heads/master.zip"
+    zip_url = "https://github.com/cs-chan/Exclusively-Dark-Image-Dataset/archive/refs/heads/master.zip"
     zip_path = dest_dir / "exdark_master.zip"
 
-    # Download zip via curl/wget or urllib
+    # Download zip via urllib or git clone
     import urllib.request
     try:
         print(f"  Downloading from {zip_url} ...")
@@ -125,7 +125,7 @@ def download_exdark(dest_dir: Path):
         return True
     except Exception as e:
         print(f"[Warning] Direct ExDark zip download failed: {e}")
-        ret = os.system(f"git clone --depth 1 https://github.com/cs-chan/ExDark.git {dest_dir}")
+        ret = os.system(f"git clone --depth 1 https://github.com/cs-chan/Exclusively-Dark-Image-Dataset.git {dest_dir}")
         return (ret == 0)
 
 
