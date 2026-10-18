@@ -222,7 +222,13 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[Device] {device}" + (f" — {torch.cuda.get_device_name(0)}" if device.type == "cuda" else ""))
     use_amp = device.type == "cuda"
-    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+    if hasattr(torch, "amp") and hasattr(torch.amp, "GradScaler"):
+        try:
+            scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+        except Exception:
+            scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+    else:
+        scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
 
     # 1. Resolve dataset roots
     roots_to_check: Dict[str, Optional[Path]] = {}

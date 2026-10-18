@@ -342,7 +342,11 @@ def build_multi_paired_train_val(
             continue
 
         # Full training pairs discovered
-        full_train = SinglePairedDataset(clean_name, tl, th, crop_size=None, augment=False)
+        try:
+            full_train = SinglePairedDataset(clean_name, tl, th, crop_size=None, augment=False)
+        except (RuntimeError, FileNotFoundError) as e:
+            print(f"[MultiDataset Warning] Skipping '{clean_name}': {e}")
+            continue
         n_total = len(full_train)
         if n_total < 2:
             print(f"[MultiDataset Warning] Dataset {clean_name} has fewer than 2 matched pairs. Skipping.")
