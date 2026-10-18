@@ -18,7 +18,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import numpy as np
 import torch
 import torch.nn.functional as F
-import yaml
 from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
 from PIL import Image, ImageDraw, ImageFont

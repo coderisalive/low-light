@@ -1,0 +1,33 @@
+name: Paired RGB restoration tests
+
+on:
+  push:
+    branches: ["main", "cleanup/**"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+      - name: Install CPU PyTorch
+        run: |
+          python -m pip install --upgrade pip
+          pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision
+      - name: Install test dependencies
+        run: pip install numpy Pillow tqdm pytest
+      - name: Compile active RGB restoration pipeline
+        run: |
+          python -m py_compile datasets/paired_evaluation_dataset.py datasets/transforms.py
+          python -m py_compile losses/paired_rgb_restoration.py metrics/reference_metrics.py
+          python -m py_compile models/paired_rgb_restoration_net.py
+          python -m py_compile scripts/train_rgb_restoration.py scripts/evaluate_rgb_restoration.py scripts/infer.py
+      - name: Run paired restoration tests
+        run: python -m pytest tests/test_paired_rgb_restoration.py -q
