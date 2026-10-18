@@ -58,6 +58,44 @@ class ColorSpaceConverter:
         rgb = torch.cat([r, g, b], dim=1)
         return torch.clamp(rgb, 0.0, 1.0)
 
+    @staticmethod
+    def ycbcr_to_rgb_gamut_safe(
+        y: torch.Tensor,
+        cbcr: torch.Tensor,
+        eps: float = 1e-6,
+    ) -> torch.Tensor:
+        """Convert to RGB while preserving chroma ratios whenever gamut permits.
+
+        Instead of clipping each RGB channel independently (which can shift hue),
+        calculate a shared CbCr scale in [0, 1] that keeps all reconstructed RGB
+        channels within the displayable [0, 1] gamut at the requested luminance.
+        """
+        cb = cbcr[:, 0:1, :, :]
+        cr = cbcr[:, 1:2, :, :]
+
+        # RGB = Y + chroma_delta for each channel (BT.601 inverse transform).
+        delta_r = 1.402 * cr
+        delta_g = -0.344136 * cb - 0.714136 * cr
+        delta_b = 1.772 * cb
+        ones = torch.ones_like(y)
+        y_safe = y.clamp(0.0, 1.0)
+
+        def maximum_scale(delta: torch.Tensor) -> torch.Tensor:
+            positive_limit = (1.0 - y_safe) / (delta.clamp_min(0.0) + eps)
+            negative_limit = y_safe / ((-delta).clamp_min(0.0) + eps)
+            return torch.where(
+                delta > eps,
+                positive_limit,
+                torch.where(delta < -eps, negative_limit, ones),
+            )
+
+        chroma_scale = torch.minimum(
+            torch.minimum(maximum_scale(delta_r), maximum_scale(delta_g)),
+            maximum_scale(delta_b),
+        ).clamp(0.0, 1.0)
+
+        return ColorSpaceConverter.ycbcr_to_rgb(y_safe, cbcr * chroma_scale)
+
 
 class BoundedResidualEnhancementHead(nn.Module):
     """
