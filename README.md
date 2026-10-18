@@ -115,3 +115,36 @@ python scripts/infer.py \
 1. **SNR-Aware Low-Light Image Enhancement**, CVPR 2022.
 2. **Deep Retinex Decomposition for Low-Light Enhancement (LOL)**, BMVC 2018.
 3. **Exclusively Dark Image Dataset (ExDark)**, IEEE TIP 2020.
+
+## Paired RGB U-Net (new supervised model)
+
+The SNR-guided model remains available, but it is not required for this experiment. The
+new `PairedRGBRestorationNet` is a multi-scale, depthwise-separable U-Net that predicts
+direct RGB corrections in logit space and is trained against paired low/high LOL-v1 images.
+
+### Train on Kaggle
+
+```bash
+python -u scripts/train_rgb_restoration.py \
+  --data_root /kaggle/working/low-light/data/lol_dataset \
+  --epochs 25 --batch_size 4 --crop_size 192 --lr 0.0002
+```
+
+The trainer makes a deterministic train/validation split from `our485`, selects the
+checkpoint by the paired RGB/luminance/chroma/gradient/contrast objective, and saves
+a labeled comparison montage. It does not load `eval15` during training or model
+selection.
+
+### Evaluate
+
+```bash
+python -u scripts/evaluate_rgb_restoration.py \
+  --checkpoint /kaggle/working/paired_rgb_unet_<timestamp>_best_checkpoint.pth \
+  --low_dir /kaggle/working/low-light/data/lol_dataset/eval15/low \
+  --high_dir /kaggle/working/low-light/data/lol_dataset/eval15/high \
+  --output_csv /kaggle/working/paired_rgb_unet_eval15.csv \
+  --comparison_dir /kaggle/working/paired_rgb_unet_eval15_comparisons \
+  --device cuda
+```
+
+Replace `<timestamp>` with the portable checkpoint timestamp printed by the trainer.
