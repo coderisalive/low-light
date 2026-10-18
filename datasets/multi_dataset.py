@@ -249,21 +249,24 @@ def discover_lol_v1_paths(root: Path) -> Tuple[Optional[Path], Optional[Path], O
 def discover_lol_v2_real_paths(root: Path) -> Tuple[Optional[Path], Optional[Path], Optional[Path], Optional[Path]]:
     """Discovers (train_low, train_high, test_low, test_high) for LOL-v2-Real."""
     base = root
-    real_cand = resolve_subfolder(root, ("Real_captured", "Real", "real_captured", "real"))
+    real_cand = resolve_subfolder(root, ("Real_captured", "Real", "real_captured", "real", "_hf_raw"))
     if real_cand is not None:
         base = real_cand
+        nested = resolve_subfolder(real_cand, ("_hf_raw",))
+        if nested is not None:
+            base = nested
 
     train_folder = resolve_subfolder(base, ("Train", "train"))
     test_folder = resolve_subfolder(base, ("Test", "test"))
 
     tl, th, el, eh = None, None, None, None
     if train_folder is not None:
-        tl = resolve_subfolder(train_folder, ("Low", "low"))
-        th = resolve_subfolder(train_folder, ("Normal", "normal", "high", "High"))
+        tl = resolve_subfolder(train_folder, ("Low", "low", "Input", "input"))
+        th = resolve_subfolder(train_folder, ("Normal", "normal", "high", "High", "GT", "gt"))
 
     if test_folder is not None:
-        el = resolve_subfolder(test_folder, ("Low", "low"))
-        eh = resolve_subfolder(test_folder, ("Normal", "normal", "high", "High"))
+        el = resolve_subfolder(test_folder, ("Low", "low", "Input", "input"))
+        eh = resolve_subfolder(test_folder, ("Normal", "normal", "high", "High", "GT", "gt"))
 
     return tl, th, el, eh
 
@@ -271,21 +274,24 @@ def discover_lol_v2_real_paths(root: Path) -> Tuple[Optional[Path], Optional[Pat
 def discover_lol_v2_synthetic_paths(root: Path) -> Tuple[Optional[Path], Optional[Path], Optional[Path], Optional[Path]]:
     """Discovers (train_low, train_high, test_low, test_high) for LOL-v2-Synthetic."""
     base = root
-    syn_cand = resolve_subfolder(root, ("Synthetic", "synthetic", "Syn", "syn"))
+    syn_cand = resolve_subfolder(root, ("Synthetic", "synthetic", "Syn", "syn", "_hf_raw"))
     if syn_cand is not None:
         base = syn_cand
+        nested = resolve_subfolder(syn_cand, ("_hf_raw",))
+        if nested is not None:
+            base = nested
 
     train_folder = resolve_subfolder(base, ("Train", "train"))
     test_folder = resolve_subfolder(base, ("Test", "test"))
 
     tl, th, el, eh = None, None, None, None
     if train_folder is not None:
-        tl = resolve_subfolder(train_folder, ("Low", "low"))
-        th = resolve_subfolder(train_folder, ("Normal", "normal", "high", "High"))
+        tl = resolve_subfolder(train_folder, ("Low", "low", "Input", "input"))
+        th = resolve_subfolder(train_folder, ("Normal", "normal", "high", "High", "GT", "gt"))
 
     if test_folder is not None:
-        el = resolve_subfolder(test_folder, ("Low", "low"))
-        eh = resolve_subfolder(test_folder, ("Normal", "normal", "high", "High"))
+        el = resolve_subfolder(test_folder, ("Low", "low", "Input", "input"))
+        eh = resolve_subfolder(test_folder, ("Normal", "normal", "high", "High", "GT", "gt"))
 
     return tl, th, el, eh
 
