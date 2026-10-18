@@ -12,6 +12,7 @@ for a separate final evaluation through scripts/evaluate.py.
 import argparse
 import csv
 import random
+import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -188,6 +189,24 @@ def save_checkpoint(
     )
 
 
+def write_per_image_metrics(path: Path, epoch: int, rows: list) -> None:
+    """Save metrics for the exact checkpoint currently selected as best."""
+    with path.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(
+            stream, fieldnames=["epoch", "image", "psnr", "ssim", "mse", "mae"]
+        )
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({
+                "epoch": epoch,
+                "image": row["image"],
+                "psnr": row["psnr"],
+                "ssim": row["ssim"],
+                "mse": row["mse"],
+                "mae": row["mae"],
+            })
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Paired RGB/chrominance fine-tuning for SNRInternalReferenceNet"
@@ -314,19 +333,16 @@ def main() -> None:
         f"[Initial held-out] PSNR={initial_metrics['psnr']:.3f} dB | "
         f"SSIM={initial_metrics['ssim']:.4f} | MAE={initial_metrics['mae']:.5f}"
     )
-    save_checkpoint(
-        exp_dir / "initial_checkpoint.pth", model, torch.optim.AdamW(trainable, lr=args.lr),
-        torch.optim.lr_scheduler.ReduceLROnPlateau(
-            torch.optim.AdamW(trainable, lr=args.lr), mode="max"
-        ),
-        config, 0, initial_metrics, str(checkpoint_path)
-    )
-
     optimizer = torch.optim.AdamW(trainable, lr=args.lr, weight_decay=1e-5)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="max", factor=0.5, patience=2,
         threshold=0.005, threshold_mode="abs", min_lr=1e-7,
     )
+    save_checkpoint(
+        exp_dir / "initial_checkpoint.pth", model, optimizer, scheduler,
+        config, 0, initial_metrics, str(checkpoint_path)
+    )
+    write_per_image_metrics(per_image_csv, 0, initial_rows)
     best_psnr = initial_metrics["psnr"]
     best_metrics = dict(initial_metrics)
     best_epoch = 0
@@ -336,7 +352,7 @@ def main() -> None:
         best_checkpoint, model, optimizer, scheduler, config, 0,
         best_metrics, str(checkpoint_path)
     )
-    torch.save(torch.load(best_checkpoint, map_location="cpu"), exported_best)
+    shutil.copy2(best_checkpoint, exported_best)
 
     history = [{
         "epoch": 0,
@@ -423,7 +439,8 @@ def main() -> None:
                 best_metrics, str(checkpoint_path)
             )
             torch.save(torch.load(best_checkpoint, map_location="cpu"), exported_best)
-            # Refresh visual examples for the current best checkpoint.
+            # Keep per-image metrics and visualizations aligned with the best checkpoint.
+            write_per_image_metrics(per_image_csv, epoch, val_rows)
             for old in comparisons_dir.glob("*.png"):
                 old.unlink()
             _, _ = evaluate(
@@ -458,14 +475,6 @@ def main() -> None:
             writer = csv.DictWriter(stream, fieldnames=list(history[0].keys()))
             writer.writeheader()
             writer.writerows(history)
-        with per_image_csv.open("w", newline="", encoding="utf-8") as stream:
-            writer = csv.DictWriter(stream, fieldnames=["epoch", "image", "psnr", "ssim", "mse", "mae"])
-            writer.writeheader()
-            writer.writerows(
-                {"epoch": epoch, "image": r["image"], "psnr": r["psnr"],
-                 "ssim": r["ssim"], "mse": r["mse"], "mae": r["mae"]}
-                for r in val_rows
-            )
 
         print(
             f"Epoch {epoch:02d}/{args.epochs} | loss={means['loss_total']:.5f} | "
