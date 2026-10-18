@@ -279,7 +279,10 @@ def main() -> None:
         pred_t = as_tensor(output, torch.device("cpu"))[0]
         low_t = item["low"]
         target_t = item["high"]
-        tiles = torch.stack([low_t, item["raw_u8"].astype(np.float32).transpose(2, 0, 1) / 255.0, pred_t, target_t])
+        raw_t = torch.from_numpy(
+            item["raw_u8"].astype(np.float32).transpose(2, 0, 1) / 255.0
+        )
+        tiles = torch.stack([low_t, raw_t, pred_t, target_t])
         vutils.save_image(
             tiles,
             comparisons / f"{Path(item['name']).stem}.png",
