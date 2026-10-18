@@ -1,17 +1,36 @@
 # LumaGuard-Net: Paired RGB U-Net for Low-Light Image Enhancement
 
-This repository currently focuses on **PairedRGBRestorationNet**, a lightweight, paired-supervised RGB U-Net for low-light image enhancement. The default model has **409,347 trainable parameters**.
+This repository implements **PairedRGBRestorationNet**, a lightweight, paired-supervised RGB U-Net for low-light image enhancement. The default model has **409,347 trainable parameters**.
 
-The model learns to map a low-light RGB image to its paired normal-light target using a multiscale encoder-decoder, skip connections, depthwise-separable residual blocks, and a residual correction in logit-RGB space.
+The model learns to map low-light RGB images to their paired normal-light targets using a multiscale encoder-decoder, skip connections, depthwise-separable residual blocks, and a residual correction in logit-RGB space.
 
-## Repository scope
+---
 
-This codebase keeps one active training/evaluation path for the paired RGB U-Net. Earlier self-supervised, SNR-internal-reference, and ablation experiments have been removed from the current source tree to avoid maintaining multiple competing entry points.
+## Supported Datasets
 
-Dataset images and model checkpoints are not stored in Git. Download LOL-v1 from the [dataset's official page](https://daooshee.github.io/BMVC2018website/) and arrange it as follows:
+The repository supports multi-dataset training and multi-benchmark testing across four standard low-light datasets:
 
+| Dataset | Type | Training Pairs / Images | Test Pairs / Images | Official Source / Citation |
+| :--- | :---: | :---: | :---: | :--- |
+| **LOL-v1** | Paired | 485 (`our485`) | 15 (`eval15`) | [Wei et al., BMVC 2018](https://daooshee.github.io/BMVC2018website/) |
+| **LOL-v2-Real** | Paired | 689 (`Train`) | 100 (`Test`) | [Yang et al., IJCV 2021](https://github.com/flyywh/LOL-v2) |
+| **LOL-v2-Synthetic** | Paired | 900 (`Train`) | 100 (`Test`) | [Yang et al., IJCV 2021](https://github.com/flyywh/LOL-v2) |
+| **ExDark** | **Unpaired** | 5,890 (train split) | 1,473 (test split) | [Loh & Chan, CVIU 2019](https://github.com/cs-chan/Exclusively-Dark-Image-Dataset) |
+
+> [!IMPORTANT]
+> **Paired vs. Unpaired Distinction**:
+> - **LOL-v1, LOL-v2-Real, and LOL-v2-Synthetic** contain matched low-/normal-light pairs. They are used for paired supervised training and full-reference evaluation (**PSNR, SSIM, MSE, MAE**).
+> - **ExDark** contains real-world nighttime low-light images across 12 object classes (**no normal-light ground truth**). It is evaluated strictly via no-reference metrics (**Information Entropy, RMS Contrast, visual inspection**). Normal-light references are **never fabricated**, and ExDark is never mixed into paired full-reference loss functions.
+
+---
+
+## Dataset Directory Layouts
+
+Datasets should be stored outside the Git repository (e.g. under `data/` or a custom path).
+
+### 1. LOL-v1
 ```text
-data/lol_dataset/
+data/lol_v1/
 ├── our485/
 │   ├── low/
 │   └── high/
@@ -20,76 +39,158 @@ data/lol_dataset/
     └── high/
 ```
 
-Keep the original paired filenames matching between each `low` and `high` directory.
+### 2. LOL-v2-Real
+```text
+data/LOL-v2-Real/
+└── Real_captured/
+    ├── Train/
+    │   ├── Low/
+    │   └── Normal/
+    └── Test/
+        ├── Low/
+        └── Normal/
+```
 
-## Install
+### 3. LOL-v2-Synthetic
+```text
+data/LOL-v2-Synthetic/
+└── Synthetic/
+    ├── Train/
+    │   ├── Low/
+    │   └── Normal/
+    └── Test/
+        ├── Low/
+        └── Normal/
+```
 
-Python 3.10+ is recommended.
+### 4. ExDark
+```text
+data/ExDark/
+├── Groundtruth/
+│   └── imageclasslist.txt      # (Optional official train/val/test split)
+├── Bicycle/
+├── Boat/
+├── Bottle/
+├── Bus/
+├── Car/
+├── Cat/
+├── Chair/
+├── Cup/
+├── Dog/
+├── Motorbike/
+├── People/
+└── Table/
+```
+
+---
+
+## Installation
+
+Python 3.10+ and PyTorch 2.0+ are recommended.
 
 ```bash
 pip install -r requirements.txt
 ```
 
-## Train
+---
 
-From the repository root:
+## Training
+
+### Multi-Dataset Training (LOL-v1 + LOL-v2-Real + LOL-v2-Synthetic)
+Train on all three paired datasets simultaneously with balanced sampling:
 
 ```bash
 python -u scripts/train_rgb_restoration.py \
-  --data_root data/lol_dataset \
+  --lolv1_root data/lol_v1 \
+  --lolv2_real_root data/LOL-v2-Real \
+  --lolv2_synthetic_root data/LOL-v2-Synthetic \
+  --sampling_mode balanced \
+  --epochs 25 \
+  --batch_size 8 \
+  --crop_size 192 \
+  --lr 0.0002 \
+  --seed 42
+```
+
+### Single Dataset Training (LOL-v1 only)
+```bash
+python -u scripts/train_rgb_restoration.py \
+  --lolv1_root data/lol_dataset \
   --epochs 12 \
   --batch_size 4 \
   --crop_size 128 \
   --lr 0.0002
 ```
 
-The trainer creates a deterministic train/validation split from `our485`. The official `eval15` directory is not loaded during training or checkpoint selection. Early stopping and best-checkpoint saving are enabled.
+### Sampling Strategies
+- `--sampling_mode balanced` (default): Balances dataset weights so each enabled dataset contributes equally in expectation.
+- `--sampling_mode proportional`: Samples uniformly from all available images in proportion to dataset sizes.
+- `--sampling_mode weighted --dataset_weights lol_v1:1.0,lol_v2_real:1.5,lol_v2_synthetic:0.5`: Applies custom sampling multipliers.
 
-On Kaggle, set `--data_root` to your local dataset path, for example `/kaggle/working/low-light/data/lol_dataset`.
+### Data Leakage Prevention Rules
+- The trainer carves a deterministic validation split (default 10%) out of the training pools only.
+- Official test sets (`eval15`, `LOL-v2-Real Test`, `LOL-v2-Synthetic Test`) are strictly isolated and never loaded during training or checkpoint selection.
 
-The trainer writes checkpoints, training history, per-image validation metrics, and labeled comparison images under its experiment output directory. Keep those generated artifacts outside Git.
+---
 
-## Evaluate on eval15
+## Evaluation
 
-Use the best checkpoint produced by training:
+### Multi-Benchmark Evaluation
+Evaluate a trained checkpoint across all available official test sets in one command:
 
 ```bash
 python -u scripts/evaluate_rgb_restoration.py \
   --checkpoint experiments/paired_rgb_unet_<timestamp>/best_checkpoint.pth \
-  --low_dir data/lol_dataset/eval15/low \
-  --high_dir data/lol_dataset/eval15/high \
-  --output_csv experiments/rgb_unet_eval15.csv \
-  --comparison_dir experiments/rgb_unet_eval15_comparisons \
-  --device auto
+  --lolv1_root data/lol_v1 \
+  --lolv2_real_root data/LOL-v2-Real \
+  --lolv2_synthetic_root data/LOL-v2-Synthetic \
+  --exdark_root data/ExDark \
+  --output_dir experiments/multi_benchmark_results
 ```
 
-Replace the checkpoint path with the actual path printed at the end of training. Evaluation reports PSNR, SSIM, MSE, and MAE and saves a labeled comparison for each matched pair.
+This outputs:
+1. `benchmark_summary.csv`: A leaderboard report with PSNR, SSIM, and MAE for paired benchmarks, and Entropy & RMS Contrast for ExDark.
+2. Individual per-image CSVs: `lol_v1_test_per_image.csv`, `lol_v2_real_test_per_image.csv`, `lol_v2_synthetic_test_per_image.csv`, `exdark_unpaired_metrics.csv`.
+3. 4-panel visual comparison figures: `[Low-light Input | RGB U-Net Output | Ground Truth | Residual x4]`.
 
-## Run inference on images
+### Single Benchmark Evaluation
+```bash
+python -u scripts/evaluate_rgb_restoration.py \
+  --checkpoint path/to/best_checkpoint.pth \
+  --low_dir data/lol_dataset/eval15/low \
+  --high_dir data/lol_dataset/eval15/high \
+  --output_dir experiments/eval15_results
+```
+
+---
+
+## Inference on Unpaired Images
+
+To enhance arbitrary low-light images or directory of images:
 
 ```bash
 python scripts/infer.py \
-  --input path/to/low_light_image.png \
+  --input path/to/image_or_folder \
   --checkpoint path/to/best_checkpoint.pth \
   --output outputs/enhanced \
   --device auto
 ```
 
-The input can be one supported image or a directory of images. The script saves an enhanced image and an input/output comparison.
+---
 
-## Metrics and evaluation discipline
+## Automated Tests
 
-- Higher PSNR and SSIM are generally better; lower MSE and MAE are better.
-- Compare input and output against the same target images with the same preprocessing.
-- Keep `eval15` reserved for final evaluation; do not repeatedly tune model choices against it.
-- Report the number of test images alongside aggregate results. LOL-v1's `eval15` split contains only 15 pairs, so results on it are useful but limited.
-
-## Tests
+Run the full automated test suite (including synthetic folder layout fixtures, filename pairing, split isolation, and ExDark parsing):
 
 ```bash
-python -m pytest tests/test_paired_rgb_restoration.py -v
+python -m pytest tests/ -v
 ```
 
-## License
+---
 
-MIT. See [LICENSE](LICENSE).
+## Citations and Licenses
+
+- **LOL-v1**: Wei et al., *"Deep Retinex Decomposition for Low-Light Enhancement"*, BMVC 2018. Available for non-commercial research.
+- **LOL-v2**: Yang et al., *"Sparse Gradient Regularized Deep Retinex Network for Robust Low-Light Image Enhancement"*, IJCV 2021.
+- **ExDark**: Loh & Chan, *"Getting to know low-light images with the Exclusively Dark dataset"*, CVIU 2019. Available for academic research.
+- **Codebase License**: MIT. See [LICENSE](LICENSE).

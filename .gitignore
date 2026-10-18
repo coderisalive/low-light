@@ -1,15 +1,37 @@
+# Python caches & virtualenvs
 __pycache__/
 *.py[cod]
-*.pth
-*.pt
+*$py.class
 .pytest_cache/
-outputs/
-experiments/
-data/lol_dataset/
-data/synthetic_sample/
-data/lol_v1/
-data/lol_v2/
-data/exdark/
 .venv/
 env/
+venv/
 .DS_Store
+
+# PyTorch Checkpoints and Model Weights
+*.pth
+*.pt
+*.onnx
+*.bin
+
+# Experiments, Outputs, and Logs
+outputs/
+experiments/
+wandb/
+*.log
+
+# Dataset folders (Never track dataset images or annotations)
+data/
+data/**
+datasets_download/
+LOL-v1/
+LOL-v2-Real/
+LOL-v2-Synthetic/
+LOLv2_Real/
+LOLv2_Synthetic/
+ExDark/
+exdark/
+lol_compat/
+*.zip
+*.tar
+*.tar.gz
