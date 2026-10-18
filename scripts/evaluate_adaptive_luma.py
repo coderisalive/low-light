@@ -21,8 +21,8 @@ import cv2
 import numpy as np
 import torch
 import torch.nn.functional as F
-import torchvision.utils as vutils
 import yaml
+from PIL import Image, ImageDraw, ImageFont
 from tqdm import tqdm
 
 from datasets.paired_evaluation_dataset import PairedEvaluationDataset
@@ -75,6 +75,49 @@ def tensor_to_rgb8(image: torch.Tensor) -> np.ndarray:
         image.detach().clamp(0.0, 1.0).permute(1, 2, 0).cpu().numpy() * 255.0
         + 0.5
     ).clip(0, 255).astype(np.uint8)
+
+
+
+
+def save_labeled_comparison(
+    path: Path,
+    panels: list[tuple[str, np.ndarray]],
+    label_height: int = 34,
+) -> None:
+    """Save an exact-value, side-by-side montage with a title bar per panel."""
+    if not panels:
+        raise ValueError("At least one comparison panel is required.")
+
+    images = [Image.fromarray(np.asarray(array, dtype=np.uint8), mode="RGB") for _, array in panels]
+    width, height = images[0].size
+    if any(image.size != (width, height) for image in images):
+        raise ValueError("Comparison panels must have identical dimensions.")
+
+    canvas = Image.new(
+        "RGB",
+        (width * len(images), height + label_height),
+        color=(28, 28, 28),
+    )
+    draw = ImageDraw.Draw(canvas)
+    try:
+        font = ImageFont.truetype("DejaVuSans.ttf", 16)
+    except OSError:
+        font = ImageFont.load_default()
+
+    for index, ((label, _), image) in enumerate(zip(panels, images)):
+        x = index * width
+        draw.rectangle((x, 0, x + width - 1, label_height - 1), fill=(35, 35, 35))
+        text_box = draw.textbbox((0, 0), label, font=font)
+        text_width = text_box[2] - text_box[0]
+        text_height = text_box[3] - text_box[1]
+        tx = x + max(4, (width - text_width) // 2)
+        ty = max(0, (label_height - text_height) // 2 - text_box[1])
+        draw.text((tx, ty), label, fill=(255, 255, 255), font=font)
+        canvas.paste(image, (x, label_height))
+        if index:
+            draw.line((x, 0, x, label_height + height), fill=(100, 100, 100), width=1)
+
+    canvas.save(path)
 
 
 def rgb8_to_tensor(rgb8: np.ndarray, device: torch.device) -> torch.Tensor:
@@ -351,14 +394,14 @@ def main() -> None:
     comparisons = output_dir / "selected_comparisons"
     comparisons.mkdir()
     for item, output in zip(cached, best_outputs):
-        raw_t = torch.from_numpy(item["raw_u8"].astype(np.float32).transpose(2, 0, 1) / 255.0)
-        enhanced_t = torch.from_numpy(output.astype(np.float32).transpose(2, 0, 1) / 255.0)
-        tiles = torch.stack([item["low"], raw_t, enhanced_t, item["target"][0].cpu()])
-        vutils.save_image(
-            tiles,
+        save_labeled_comparison(
             comparisons / f"{Path(item['name']).stem}.png",
-            nrow=4,
-            normalize=False,
+            [
+                ("Low-light Input", tensor_to_rgb8(item["low"])),
+                ("Original Model Output", item["raw_u8"]),
+                ("Adaptive Output", output),
+                ("Ground Truth", tensor_to_rgb8(item["target"][0].cpu())),
+            ],
         )
 
     print("=" * 76)
