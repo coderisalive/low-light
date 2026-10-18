@@ -13,6 +13,7 @@ def test_paired_restoration_loss_is_finite_and_backpropagates():
     assert set(terms) == {
         "loss_total", "loss_rgb", "loss_luminance",
         "loss_chrominance", "loss_gradient", "loss_color_angle",
+        "loss_contrast",
     }
 
     loss.backward()
@@ -36,3 +37,20 @@ def test_chrominance_weight_changes_total_loss():
     assert torch.isfinite(low_chroma_weight)
     assert torch.isfinite(high_chroma_weight)
     assert high_chroma_weight > low_chroma_weight
+
+
+def test_local_contrast_loss_is_finite_and_weighted():
+    target = torch.rand(1, 3, 32, 32)
+    prediction = torch.nn.functional.avg_pool2d(target, kernel_size=3, stride=1, padding=1)
+    prediction.requires_grad_(True)
+
+    loss_no_contrast, _ = paired_restoration_loss(
+        prediction, target, w_contrast=0.0
+    )
+    loss_with_contrast, terms = paired_restoration_loss(
+        prediction, target, w_contrast=1.0
+    )
+
+    assert torch.isfinite(terms["loss_contrast"])
+    assert loss_with_contrast >= loss_no_contrast
+
