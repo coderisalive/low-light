@@ -298,3 +298,40 @@ def test_ycbcr_round_trip_constant_boundaries():
     assert out.shape == rgb.shape
     assert torch.isfinite(out).all()
     assert out.min() >= 0 and out.max() <= 1
+
+
+def test_gamut_safe_ycbcr_inverse_preserves_luminance_and_bounds():
+    """Gamut-aware conversion should keep RGB bounded without unnecessary hue clipping."""
+    y = torch.full((1, 1, 8, 8), 0.20, dtype=torch.float32)
+    cbcr = torch.full((1, 2, 8, 8), 0.40, dtype=torch.float32)
+
+    rgb = ColorSpaceConverter.ycbcr_to_rgb_gamut_safe(y, cbcr)
+    recovered_y, _ = ColorSpaceConverter.rgb_to_ycbcr(rgb)
+
+    assert torch.isfinite(rgb).all()
+    assert rgb.min().item() >= 0.0
+    assert rgb.max().item() <= 1.0
+    assert (recovered_y - y).abs().mean().item() < 1e-5
+
+
+def test_adaptive_chrominance_gain_restores_color_with_reliability_gating():
+    """The new gain should restore more chroma than the old cap and gate uncertain regions."""
+    y_orig = torch.full((1, 1, 8, 8), 0.05)
+    y_base = torch.full((1, 1, 8, 8), 0.50)
+    q_low = torch.zeros_like(y_orig)
+    q_high = torch.ones_like(y_orig)
+
+    gain_low = ConservativeEnhancementHead.adaptive_chrominance_gain(
+        y_orig, y_base, q_low
+    )
+    gain_high = ConservativeEnhancementHead.adaptive_chrominance_gain(
+        y_orig, y_base, q_high
+    )
+    old_gain = (((y_base + 1e-4) / (y_orig + 1e-4)).clamp(1.0, 4.0)).pow(0.50)
+
+    assert torch.isfinite(gain_low).all()
+    assert torch.isfinite(gain_high).all()
+    assert torch.all(gain_low > old_gain)
+    assert torch.all(gain_high > gain_low)
+    assert torch.all(gain_high <= 6.0 ** 0.70 + 1e-5)
+
