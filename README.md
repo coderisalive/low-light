@@ -240,6 +240,80 @@ python -m pytest tests/ -v
 
 ---
 
+## Consolidated Project Documentation
+
+This repository originally had separate README files for the model, test, datasets, scripts, and output folders. The key points have been consolidated here so the project can be understood from one entry point.
+
+### Architecture
+
+The model is a paired RGB low-light enhancement network built around a U-Net style encoder-decoder architecture, skip connections, residual blocks, and RGB correction logic. The main implementation lives in `models/paired_rgb_restoration_net.py` and is designed to map low-light inputs to their normal-light counterparts.
+
+Key architecture components:
+
+- multiscale encoder-decoder structure
+- skip connections to preserve spatial detail
+- depthwise-separable residual blocks for efficiency
+- residual correction in RGB/logit space
+- supervised training with paired low/normal-light images
+
+### Dataset Handling
+
+The training and evaluation pipeline supports multiple public low-light datasets:
+
+- LOL-v1: paired dataset with `our485` training and `eval15` test split
+- LOL-v2-Real: paired dataset with `Train` and `Test` folders
+- LOL-v2-Synthetic: paired synthetic dataset
+- ExDark: unpaired dataset evaluated with no-reference metrics only
+
+Dataset discovery and loading logic is handled mainly in `datasets/multi_dataset.py` and `datasets/exdark_dataset.py`.
+
+Important dataset rules:
+
+- paired datasets are for supervised training and full-reference evaluation
+- ExDark is never mixed into paired supervision or paired loss functions
+- official test splits remain isolated from training data
+
+### Workflow
+
+Typical workflow for this project:
+
+1. Prepare datasets under `data/`
+2. Install dependencies with `pip install -r requirements.txt`
+3. Train the restoration model using `scripts/train_rgb_restoration.py`
+4. Evaluate the checkpoint with `scripts/evaluate_rgb_restoration.py`
+5. Run inference on new low-light images with `scripts/infer.py`
+6. Inspect generated results under `experiments/` and `outputs/`
+
+### Directory Responsibilities
+
+- `datasets/`: dataset loaders, transforms, and pairing utilities
+- `models/`: network definitions and architecture code
+- `losses/`: training objectives for paired restoration
+- `metrics/`: full-reference and no-reference evaluation metrics
+- `scripts/`: CLI training, evaluation, and inference pipelines
+- `configs/`: reusable training/inference configuration presets
+- `experiments/`: checkpoints, logs, and run artifacts
+- `outputs/`: comparison outputs, CSV summaries, and visual results
+- `tests/`: validation tests for dataset loading and model behavior
+
+### Validation and Quality Checks
+
+The test suite covers the most important workflow guarantees:
+
+- dataset discovery for multi-dataset layouts
+- filename pairing logic
+- split isolation between training and evaluation data
+- ExDark parsing and no-reference metric handling
+- paired restoration behavior and model integration
+
+Run it with:
+
+```bash
+python -m pytest tests/ -v
+```
+
+---
+
 ## Citations and Licenses
 
 - **LOL-v1**: Wei et al., *"Deep Retinex Decomposition for Low-Light Enhancement"*, BMVC 2018. Available for non-commercial research.
